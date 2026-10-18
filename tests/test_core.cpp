@@ -1,3 +1,5 @@
+#include "../src/core/history.hpp"
+#include "../src/core/match.hpp"
 #include "../src/core/roles.hpp"
 #include "../src/core/roster.hpp"
 #include "../src/core/text.hpp"
@@ -151,8 +153,45 @@ static void testUpdate() {
   CHECK(kept); CHECK(!r2.loadFromJson("{oops"));
 }
 
+static void testNewFeatures() {
+  CHECK_EQ(stripAccountSuffix(":Foo Bar.1234"), "Foo Bar"); CHECK_EQ(stripAccountSuffix("neco.9451 (alt)"), "neco"); CHECK_EQ(stripAccountSuffix("NoDigits"), "NoDigits");
+  RoleSet rs = RoleSet::defaults();
+  // order requested by the user: HK right after VG Condi DPS, Pusher before G1
+  std::vector<std::string> order; for (auto& r : rs.roles()) order.push_back(r.code);
+  auto idx = [&](const char* c) { for (size_t i = 0; i < order.size(); ++i) if (order[i] == c) return (int)i; return -1; };
+  CHECK(idx("hk") == idx("vg_condi_dps") + 1); CHECK(idx("pusher") + 1 == idx("g1"));
+
+  Assignments a; std::vector<Member> pres(5);
+  const char* names[] = {"A.1111", "B.2222", "C.3333", "D.4444", "E.5555"};
+  for (int i = 0; i < 5; ++i) pres[i].account = names[i];
+  a.set("A.1111", "boonheal__alac"); a.set("B.2222", "boonheal__alac"); a.set("C.3333", "dps"); a.set("D.4444", "pusher");
+  CHECK_EQ(copyByRole(rs, a, pres, "heal"), "A, B - Alac Heal");
+  CHECK_EQ(copyByRole(rs, a, pres, ""), "A, B - Alac Heal; C - DPS; D - Pusher");
+  CHECK_EQ(copyByRole(rs, a, pres, "boondps"), "");
+  CHECK_EQ(copyOneRole(rs, a, pres, "pusher"), "D - Pusher");
+  a.setTank("a.1111", true); CHECK(a.isTank("A.1111")); CHECK(!a.isTank("B.2222"));
+  Assignments b; CHECK(b.loadFromJson(a.toJson())); CHECK(b.isTank(":A.1111"));
+  std::vector<Member> two(1); two[0].account = "B.2222"; b.prune(two); CHECK(!b.isTank("A.1111"));
+
+  // history: 2 Alac DPS + 1 unassigned leave -> "2AlacDPS, 1DPS"
+  std::vector<SnapMember> snap;
+  auto add = [&](const char* acct, const char* role) { SnapMember s; s.m.account = acct; s.role = role; snap.push_back(s); };
+  add("Keep.1", "dps"); add("P.1111", "boondps__alac"); add("Q.2222", "boondps__alac"); add("U.3333", "");
+  std::vector<Member> after(2); after[0].account = "Keep.1"; after[1].account = "New.9999";
+  ChangeEntry e = diffForHistory(snap, after, "12:00");
+  CHECK(e.joined.size() == 1 && e.joined[0] == "New.9999" && e.left.size() == 3);
+  CHECK_EQ(leftRolesClipboard(e, rs), "2AlacDPS, 1DPS");
+  CHECK_EQ(leftRolesDisplay(e, rs), "2 Alac DPS, 1 DPS");
+  ChangeLog log; for (int i = 0; i < 13; ++i) { ChangeEntry x; x.time = std::to_string(i); log.push(x); }
+  CHECK(log.entries().size() == 10 && log.entries()[0].time == "12");
+  ChangeLog log2; CHECK(log2.loadFromJson(log.toJson())); CHECK(log2.entries().size() == 10);
+  log.push(e); ChangeLog log3; CHECK(log3.loadFromJson(log.toJson())); CHECK(log3.entries()[0].left.size() == 3 && log3.entries()[0].left[0].role == "boondps__alac");
+  log.clear(); CHECK(log.entries().empty());
+  std::vector<SnapMember> rt; CHECK(snapshotFromJson(snapshotToJson(snap), &rt)); CHECK(rt.size() == 4 && rt[1].role == "boondps__alac");
+}
+
 int main() {
-  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate();
+  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures();
   std::printf("%d checks, %d failed\n", g_n, g_fail);
   return g_fail ? 1 : 0;
 }

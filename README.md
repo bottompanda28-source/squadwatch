@@ -4,8 +4,10 @@ A standalone Nexus (Raidcore) addon. It does not need Unofficial Extras.
 
 - **Update from clipboard**: copy the squad list with Squad Attendance (or anything that gives `Account.1234, Character` per line), press *Update from clipboard*. The pasted list is the truth: accounts missing from it are treated as having left; a changed character name is fine. Subgroups and roles you set are kept.
 - **Squad tab**: players grouped by subgroup. Click *Sub* to move someone to a subgroup (1-10), click the role button to assign a role (with icon), `X` removes one player. Each player shows BLOCKED / FLAGGED / TRUSTED and up to 3 tags (role-relevant first, then your pinned tags); hover for the derived summary and notes. Same matching rules as the Raid Squad Composer. *Copy squad* copies the list back out.
-- **Roles tab**: all roles built in (Quick/Alac Heal and DPS, DPS, VG Condi DPS, G1, Kite G2, Pusher, QTP Pylon Kiter, HK, Q1 Kite, Lamp, Mat Tank, Ranged DPS, Decima Kite). Set how many seats you want per role with `-`/`+` to see OPEN roles at a glance. *Assign unassigned as DPS* fills everyone without a role.
-- **Changes tab**: who joined / left / changed character in the last update, with watchlist markers.
+- **Copying**: click a player's name to copy it without the number suffix (`Name.1234` -> `Name`). In the Squad tab, *Copy by role* (DPS / Healers / BoonDPS / Specialty / All roles) copies the composer-style text `Name1, Name2 - Role; Name3 - Role`. Clicking a role row in the Roles tab copies just that role.
+- **Tank**: a *Tank* toggle appears next to a player's role when it is Quick or Alac Heal; it only marks that healer as the tank (shown as "(tank)" in the Roles tab).
+- **Roles tab**: all roles built in (Quick/Alac Heal and DPS, DPS, VG Condi DPS, HK, Pusher, G1, Kite G2, Q2 Kite, Q1 Kite, Lamp, Mat Tank, Ranged DPS, Decima Kite). Set how many seats you want per role with `-`/`+` to see OPEN roles at a glance. *Assign unassigned as DPS* fills everyone without a role.
+- **Changes tab**: the last 10 updates that added or removed people (*Clear change log* empties it). Each entry lists who joined, who left and which role each leaver held, plus a "Roles left" line. Leavers are compared against the squad as it was when you last assigned a role (or last updated), so a player you removed with `X` is still reported. Click an entry to copy the roles that left, e.g. `2AlacDPS, 1DPS` (unassigned leavers count as DPS).
 - The squad, subgroups and roles are saved and survive restarts. Optional (off by default, Nexus options): also follow ArcDPS live squad events.
 
 ## Install
@@ -20,7 +22,7 @@ Local: `cmake -S . -B build -A x64 && cmake --build build --config Release`.
 
 ## What has and has not been verified
 Verified (Linux, native):
-- 78 unit checks of the core (paste parsing, clipboard formatting, roster update/remove, roles, watchlist).
+- 103 unit checks of the core (paste parsing, clipboard formatting, roster update/remove, roles, watchlist).
 - Name matching agrees with the composer's JavaScript on 9,508 names (all real names in your watchlist plus fuzzed edge cases), and standing / visible tags / derived text agree on every watchlist entry.
 - The Nexus/ImGui glue compiles (syntax-checked) against the real `Nexus.h` v6 and ImGui 1.80 with a stub `windows.h`.
 

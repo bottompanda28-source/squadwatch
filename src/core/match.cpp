@@ -87,6 +87,46 @@ std::vector<std::u32string> splitPieces(const std::u32string& t) {
 
 std::string trimNameDecor(const std::string& s) { return toUtf8(trimDecorU(toU32(s))); }
 
+std::string stripAccountSuffix(const std::string& name) {
+  // s = name.replace(/^[:@\s]+/, '').replace(brackets, ' ').trim()
+  std::u32string t = toU32(name);
+  size_t b = 0;
+  while (b < t.size() && (t[b] == ':' || t[b] == '@' || isJsSpace(t[b]))) ++b;
+  std::u32string s = stripBrackets(t.substr(b));
+  size_t sb = 0, se = s.size();
+  while (sb < se && isJsSpace(s[sb])) ++sb;
+  while (se > sb && isJsSpace(s[se - 1])) --se;
+  s = s.substr(sb, se - sb);
+  // /^(.*?)\.\d{2,6}(?!\d)/ : first '.' followed by a run of 2-6 digits
+  bool found = false;
+  for (size_t i = 0; i < s.size() && !found; ++i) {
+    if (s[i] != '.') continue;
+    size_t n = 0;
+    while (i + 1 + n < s.size() && isAsciiDigit(s[i + 1 + n])) ++n;
+    if (n >= 2 && n <= 6) { s = s.substr(0, i); found = true; }
+  }
+  if (!found) {
+    // s.split(/\s*(?:\/|\||;|&|\+)\s*/)[0].replace(/\s+[-–—]\s+.*$/, '')
+    size_t cut = s.size();
+    for (size_t i = 0; i < s.size(); ++i)
+      if (s[i] == '/' || s[i] == '|' || s[i] == ';' || s[i] == '&' || s[i] == '+') { cut = i; break; }
+    s = s.substr(0, cut);
+    for (size_t k = 1; k + 1 < s.size(); ++k)
+      if ((s[k] == '-' || s[k] == 0x2013 || s[k] == 0x2014) && isJsSpace(s[k - 1]) && isJsSpace(s[k + 1])) {
+        size_t c2 = k; while (c2 > 0 && isJsSpace(s[c2 - 1])) --c2;
+        s = s.substr(0, c2); break;
+      }
+  }
+  // .replace(/\.\d+$/, '').trim()  then trimNameDecor
+  size_t e = s.size();
+  size_t d = e; while (d > 0 && isAsciiDigit(s[d - 1])) --d;
+  if (d < e && d > 0 && s[d - 1] == '.') s = s.substr(0, d - 1);
+  size_t tb = 0, te = s.size();
+  while (tb < te && isJsSpace(s[tb])) ++tb;
+  while (te > tb && isJsSpace(s[te - 1])) --te;
+  return toUtf8(trimDecorU(s.substr(tb, te - tb)));
+}
+
 std::vector<std::string> candidateVariants(const std::string& raw) {
   std::vector<std::string> out;
   Adder add{out};

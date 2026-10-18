@@ -1,5 +1,7 @@
 #include "roles.hpp"
 #include <algorithm>
+#include <functional>
+#include "match.hpp"
 #include "text.hpp"
 #include <nlohmann/json.hpp>
 
@@ -9,22 +11,22 @@ using nlohmann::json;
 RoleSet RoleSet::defaults() {
   RoleSet s;
   s.roles_ = {
-    {"boonheal__quick", "Quick Heal", "heal", "quickheal"},
-    {"boonheal__alac", "Alac Heal", "heal", "alacheal"},
-    {"boondps__quick", "Quick DPS", "boondps", "quickdps"},
-    {"boondps__alac", "Alac DPS", "boondps", "alacdps"},
-    {"dps", "DPS", "dps", "crossed_swords"},
-    {"vg_condi_dps", "VG Condi DPS", "specialty", "fire"},
-    {"g1", "G1", "specialty", "green_circle"},
-    {"kite_g2", "Kite G2", "specialty", "1hc1dhuum"},
-    {"pusher", "Pusher", "specialty", "rightwards_pushing_hand"},
-    {"qtp_pylon_kiter", "QTP Pylon Kiter", "specialty", "1ka1qadim"},
-    {"hk", "HK", "specialty", "hand_splayed"},
-    {"kite", "Q1 Kite", "specialty", "1mg1qadim"},
-    {"lamp", "Lamp", "specialty", "diya_lamp"},
-    {"mat_tank", "Mat Tank", "specialty", "dragon"},
-    {"ranged_dps", "Ranged DPS", "specialty", "bow_and_arrow"},
-    {"decima_kite", "Decima Kite", "specialty", ""},
+    {"boonheal__quick", "Quick Heal", "heal", "quickheal", "QuickHeal"},
+    {"boonheal__alac", "Alac Heal", "heal", "alacheal", "AlacHeal"},
+    {"boondps__quick", "Quick DPS", "boondps", "quickdps", "QuickDPS"},
+    {"boondps__alac", "Alac DPS", "boondps", "alacdps", "AlacDPS"},
+    {"dps", "DPS", "dps", "crossed_swords", "DPS"},
+    {"vg_condi_dps", "VG Condi DPS", "specialty", "fire", "VGCondiDPS"},
+    {"hk", "HK", "specialty", "hand_splayed", "HK"},
+    {"pusher", "Pusher", "specialty", "rightwards_pushing_hand", "Pusher"},
+    {"g1", "G1", "specialty", "green_circle", "G1"},
+    {"kite_g2", "Kite G2", "specialty", "1hc1dhuum", "KiteG2"},
+    {"qtp_pylon_kiter", "Q2 Kite", "specialty", "1ka1qadim", "Q2kite"},
+    {"kite", "Q1 Kite", "specialty", "1mg1qadim", "Q1Kite"},
+    {"lamp", "Lamp", "specialty", "diya_lamp", "Lamp"},
+    {"mat_tank", "Mat Tank", "specialty", "dragon", "MatTank"},
+    {"ranged_dps", "Ranged DPS", "specialty", "bow_and_arrow", "RangedDPS"},
+    {"decima_kite", "Decima Kite", "specialty", "", "DecimaKite"},
   };
   return s;
 }
@@ -45,16 +47,29 @@ std::string Assignments::get(const std::string& account) const {
   auto it = map_.find(normKey(stripAccountPrefix(account)));
   return it == map_.end() ? "" : it->second;
 }
+bool Assignments::isTank(const std::string& account) const { return tanks_.count(normKey(stripAccountPrefix(account))) > 0; }
+void Assignments::setTank(const std::string& account, bool on) {
+  std::string k = normKey(stripAccountPrefix(account));
+  if (k.empty()) return;
+  if (on) tanks_.insert(k); else tanks_.erase(k);
+}
+
 void Assignments::prune(const std::vector<Member>& present) {
   for (auto it = map_.begin(); it != map_.end();) {
     bool here = false;
     for (const auto& m : present) if (m.key() == it->first) { here = true; break; }
     it = here ? std::next(it) : map_.erase(it);
   }
+  for (auto it = tanks_.begin(); it != tanks_.end();) {
+    bool here = false;
+    for (const auto& m : present) if (m.key() == *it) { here = true; break; }
+    it = here ? std::next(it) : tanks_.erase(it);
+  }
 }
 std::string Assignments::toJson() const {
-  json j; j["version"] = 1; j["assignments"] = json::object();
+  json j; j["version"] = 1; j["assignments"] = json::object(); j["tanks"] = json::array();
   for (const auto& kv : map_) j["assignments"][kv.first] = kv.second;
+  for (const auto& t : tanks_) j["tanks"].push_back(t);
   return j.dump(2);
 }
 bool Assignments::loadFromJson(const std::string& text, std::string* err) {
@@ -62,9 +77,11 @@ bool Assignments::loadFromJson(const std::string& text, std::string* err) {
   try { root = json::parse(text); }
   catch (const std::exception& ex) { if (err) *err = std::string("Not valid JSON: ") + ex.what(); return false; }
   if (!root.is_object() || !root.contains("assignments") || !root["assignments"].is_object()) { if (err) *err = "No \"assignments\" object."; return false; }
-  map_.clear();
+  map_.clear(); tanks_.clear();
   for (auto it = root["assignments"].begin(); it != root["assignments"].end(); ++it)
     if (it.value().is_string()) map_[normKey(it.key())] = it.value().get<std::string>();
+  if (root.contains("tanks") && root["tanks"].is_array())
+    for (const auto& t : root["tanks"]) if (t.is_string()) tanks_.insert(normKey(t.get<std::string>()));
   return true;
 }
 
@@ -85,6 +102,29 @@ std::vector<BoardRow> buildBoard(const RoleSet& roles, const Assignments& a, con
     rows.push_back(row);
   }
   return rows;
+}
+
+
+static std::string groupText(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present, const std::function<bool(const RoleDef&)>& pick) {
+  std::string out;
+  for (const auto& r : roles.roles()) {
+    if (!pick(r)) continue;
+    std::string names; int n = 0;
+    for (const auto& m : present) {
+      const std::string& who = m.account.empty() ? m.character : m.account;
+      if (a.get(who) != r.code) continue;
+      names += (n++ ? ", " : "") + stripAccountSuffix(who);
+    }
+    if (!n) continue;
+    out += (out.empty() ? "" : "; ") + names + " - " + r.label;
+  }
+  return out;
+}
+std::string copyByRole(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present, const std::string& roleClass) {
+  return groupText(roles, a, present, [&](const RoleDef& r) { return roleClass.empty() || r.roleClass == roleClass; });
+}
+std::string copyOneRole(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present, const std::string& code) {
+  return groupText(roles, a, present, [&](const RoleDef& r) { return r.code == code; });
 }
 
 }

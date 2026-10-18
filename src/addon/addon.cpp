@@ -4,6 +4,8 @@
 #include "imgui.h"
 #include "icon_png.hpp"
 #include "role_icons.hpp"
+#include "../core/history.hpp"
+#include "../core/match.hpp"
 #include "../core/roles.hpp"
 #include "../core/roster.hpp"
 #include "../core/text.hpp"
@@ -17,6 +19,7 @@
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <ctime>
 
 using namespace sw;
 namespace fs = std::filesystem;
@@ -44,8 +47,9 @@ Watchlist gWatch;
 RoleSet gRoles = RoleSet::defaults();
 Assignments gAssign;
 std::map<std::string, int> gNeed;      // role code -> seats wanted (0 = no target)
-std::vector<Change> gChanges;          // what the last "Update from clipboard" changed
-std::string gChangeSummary;
+ChangeLog gLog;                        // last 10 updates (who joined, which roles left)
+std::vector<SnapMember> gSnap;         // roster + roles as of the last role assignment / update
+bool gSnapValid = false;
 bool gUseLive = false;                 // ArcDPS live squad events (off: the clipboard list is the truth)
 CopyOptions gCopy;
 bool gVisible = false;
@@ -108,6 +112,12 @@ std::string clipboardRead() {
 // ---- persistence ----
 void saveAssignments() { if (!writeFile(P("assignments.json"), gAssign.toJson())) logI("could not write assignments.json"); }
 
+void saveHistory() { writeFile(P("changes.json"), gLog.toJson()); }
+void saveSnapshot() { writeFile(P("snapshot.json"), snapshotToJson(gSnap)); }
+void loadHistoryAndSnapshot() {
+  bool ok; std::string t = readFile(P("changes.json"), &ok); if (ok) gLog.loadFromJson(t);
+  t = readFile(P("snapshot.json"), &ok); if (ok && snapshotFromJson(t, &gSnap)) gSnapValid = !gSnap.empty();
+}
 void saveSquad() { writeFile(P("squad.json"), gRoster.toJson()); }
 void loadSquad() { bool ok; std::string t = readFile(P("squad.json"), &ok); if (ok) gRoster.loadFromJson(t); }
 
@@ -166,24 +176,61 @@ void doCopy() {
   alert(gStatus);
 }
 
+std::vector<SnapMember> snapshotOfRoster() {
+  std::vector<SnapMember> v;
+  for (const auto& m : gRoster.members()) v.push_back({m, gAssign.get(m.account.empty() ? m.character : m.account)});
+  return v;
+}
+// The baseline for "who left": refreshed whenever a role is assigned, and after every update.
+void refreshSnapshot() { gSnap = snapshotOfRoster(); gSnapValid = true; saveSnapshot(); }
+
+std::string nowString() {
+  std::time_t t = std::time(nullptr);
+  char buf[16] = "";
+  if (const std::tm* lt = std::localtime(&t)) std::strftime(buf, sizeof buf, "%H:%M", lt);
+  return buf;
+}
+
+void copyText(const std::string& text, const std::string& what) {
+  if (text.empty()) { gStatus = "Nothing to copy: " + what; return; }
+  gStatus = clipboardWrite(text) ? "Copied " + what + ": " + text : "Could not open the clipboard";
+  alert(gStatus.size() > 120 ? gStatus.substr(0, 117) + "..." : gStatus);
+}
+
+// Single place where a role changes: keeps the tank flag valid and moves the "who left" baseline.
+void assignRole(const std::string& who, const std::string& code) {
+  gAssign.set(who, code);
+  if (gRoles.classOf(code) != "heal") gAssign.setTank(who, false);
+  saveAssignments();
+  refreshSnapshot();
+}
+
 // The clipboard list (e.g. from Squad Attendance) is the truth: accounts missing from it have left the squad.
 void doUpdate() {
   auto list = parsePaste(clipboardRead());
   if (list.empty()) { gStatus = "Clipboard has no recognisable names"; alert(gStatus); return; }
-  bool first = gRoster.size() == 0;
-  gChanges = gRoster.applyUpdate(list);
+  bool first = gRoster.size() == 0 && !gSnapValid;
+  std::vector<SnapMember> before = gSnapValid ? gSnap : snapshotOfRoster();
+  gRoster.applyUpdate(list);
+  if (first) {
+    gStatus = "First list: " + std::to_string(gRoster.size()) + " members";
+  } else {
+    ChangeEntry e = diffForHistory(before, gRoster.members(), nowString());
+    std::string left = leftRolesDisplay(e, gRoles);
+    if (e.joined.empty() && e.left.empty()) gStatus = "Updated: no changes (" + std::to_string(gRoster.size()) + " members)";
+    else {
+      gLog.push(e); saveHistory();
+      gStatus = "Updated: +" + std::to_string(e.joined.size()) + " joined, -" + std::to_string(e.left.size()) + " left" + (left.empty() ? "" : " (" + left + ")");
+    }
+  }
   gAssign.prune(gRoster.members());
-  int j = 0, l = 0, c = 0;
-  for (auto& ch : gChanges) { j += ch.kind == Change::Joined; l += ch.kind == Change::Left; c += ch.kind == Change::CharacterChanged; }
-  gChangeSummary = first ? "First list: no earlier squad to compare with" : ("+" + std::to_string(j) + " joined, -" + std::to_string(l) + " left, " + std::to_string(c) + " changed character");
-  gStatus = "Updated: " + std::to_string(gRoster.size()) + " members" + (first ? "" : " (" + gChangeSummary + ")");
-  saveSquad(); saveAssignments();
+  saveSquad(); saveAssignments(); refreshSnapshot();
   alert(gStatus);
 }
 
 void removeMember(const Member& m) {
   const std::string who = m.account.empty() ? m.character : m.account;
-  gRoster.remove(who); gAssign.set(who, "");
+  gRoster.remove(who); gAssign.set(who, ""); gAssign.setTank(who, false);   // snapshot kept: the next update still reports this player as left
   saveSquad(); saveAssignments();
 }
 void setSubgroup(const Member& m, int sg) {
@@ -196,7 +243,7 @@ void assignUnassignedDps() {
     const std::string& who = m.account.empty() ? m.character : m.account;
     if (gAssign.get(who).empty()) { gAssign.set(who, "dps"); ++n; }
   }
-  saveAssignments();
+  saveAssignments(); refreshSnapshot();
   gStatus = "Assigned DPS to " + std::to_string(n) + " players";
 }
 
@@ -263,6 +310,14 @@ void drawTags(const WlEntry& e, const std::string& roleClass) {
   }
 }
 
+// Tables use stronger, always-visible borders so the columns read clearly in game.
+constexpr ImGuiTableFlags kTableFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp;
+void pushTableBorderColors() {
+  ImGui::PushStyleColor(ImGuiCol_TableBorderStrong, ImVec4(0.62f, 0.66f, 0.74f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_TableBorderLight, ImVec4(0.50f, 0.54f, 0.62f, 0.95f));
+}
+void popTableBorderColors() { ImGui::PopStyleColor(2); }
+
 void drawMemberRow(const Member& m, int idx) {
   const std::string& who = m.account.empty() ? m.character : m.account;
   const WlEntry* e = gWatch.match(m.account, m.character);
@@ -274,15 +329,18 @@ void drawMemberRow(const Member& m, int idx) {
   ImGui::PushID(idx);
   ImGui::TableNextColumn();
   ImGui::TextColored(standingColor(st), "%s", who.c_str());
+  bool nameHovered = ImGui::IsItemHovered();
+  if (ImGui::IsItemClicked()) copyText(stripAccountSuffix(who), "name");
   if (!m.account.empty() && !m.character.empty()) { ImGui::SameLine(); ImGui::TextDisabled("%s", m.character.c_str()); }
-  if (e && ImGui::IsItemHovered()) {
-    std::string tip = gWatch.derivedText(*e);
-    if (gShowNotes) for (auto& n : e->notes) tip += (tip.empty() ? "" : "\n- ") + n;
-    if (!tip.empty()) ImGui::SetTooltip("%s", tip.c_str());
+  if (nameHovered) {
+    std::string tip = e ? gWatch.derivedText(*e) : std::string();
+    if (e && gShowNotes) for (auto& n : e->notes) tip += (tip.empty() ? "" : "\n- ") + n;
+    tip += (tip.empty() ? "" : "\n\n") + std::string("Click to copy \"") + stripAccountSuffix(who) + "\"";
+    ImGui::SetTooltip("%s", tip.c_str());
   }
   ImGui::TableNextColumn();
-  if (st != Standing::None) ImGui::TextColored(standingColor(st), "%s", standingLabel(st));
-  if (e && gShowTags) { if (st != Standing::None) ImGui::SameLine(); drawTags(*e, cls); }
+  // blocked / flagged / trusted are shown by the name colour (red / yellow / green), so no label here
+  if (e && gShowTags) drawTags(*e, cls);
 
   // subgroup
   ImGui::TableNextColumn();
@@ -298,7 +356,7 @@ void drawMemberRow(const Member& m, int idx) {
     ImGui::EndPopup();
   }
 
-  // role
+  // role (+ tank toggle for healers)
   ImGui::TableNextColumn();
   const RoleDef* rd = gRoles.find(role);
   if (rd && drawRoleIcon(rd->icon, 18.f)) ImGui::SameLine();
@@ -306,12 +364,20 @@ void drawMemberRow(const Member& m, int idx) {
   if (ImGui::SmallButton((label + "##role").c_str())) ImGui::OpenPopup("rolepick");
   if (ImGui::BeginPopup("rolepick")) {
     ImGui::TextDisabled("%s", who.c_str());
-    if (ImGui::Selectable("(none)", role.empty())) { gAssign.set(who, ""); saveAssignments(); }
+    if (ImGui::Selectable("(none)", role.empty())) assignRole(who, "");
     for (const auto& r : gRoles.roles()) {
       if (drawRoleIcon(r.icon, 16.f)) ImGui::SameLine();
-      if (ImGui::Selectable(r.label.c_str(), role == r.code)) { gAssign.set(who, r.code); saveAssignments(); }
+      if (ImGui::Selectable(r.label.c_str(), role == r.code)) assignRole(who, r.code);
     }
     ImGui::EndPopup();
+  }
+  if (cls == "heal") {
+    bool tank = gAssign.isTank(who);
+    ImGui::SameLine();
+    if (tank) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.55f, 0.30f, 1.0f));
+    if (ImGui::SmallButton("Tank##tank")) { gAssign.setTank(who, !tank); saveAssignments(); }
+    if (tank) ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tank ? "Marked as tank (click to unmark)" : "Mark this healer as the tank");
   }
 
   ImGui::TableNextColumn();
@@ -321,15 +387,22 @@ void drawMemberRow(const Member& m, int idx) {
 }
 
 void drawSquadTab() {
-  if (ImGui::Button("Copy squad")) doCopy();
+  if (ImGui::Button("Copy squad")) { if (gRoster.size()) { doCopy(); } else gStatus = "Nothing to copy: squad list is empty"; }
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies the list to the clipboard using the format set in Nexus options");
+  ImGui::SameLine(); ImGui::TextDisabled("Copy by role:");
+  struct G { const char* label; const char* cls; } groups[] = {{"DPS", "dps"}, {"Healers", "heal"}, {"BoonDPS", "boondps"}, {"Specialty", "specialty"}, {"All roles", ""}};
+  for (const auto& g : groups) {
+    ImGui::SameLine();
+    if (ImGui::Button(g.label)) copyText(copyByRole(gRoles, gAssign, gRoster.members(), g.cls), std::string(g.label) + " roles");
+  }
   std::vector<Member> list = gRoster.sorted();
   if (list.empty()) { ImGui::TextDisabled("Squad is empty. Copy the list from Squad Attendance, then press Update from clipboard."); return; }
-  if (ImGui::BeginTable("squad", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+  pushTableBorderColors();
+  if (ImGui::BeginTable("squad", 5, kTableFlags)) {
     ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch, 2.f);
     ImGui::TableSetupColumn("Watchlist", ImGuiTableColumnFlags_WidthStretch, 2.f);
     ImGui::TableSetupColumn("Sub", ImGuiTableColumnFlags_WidthFixed, 55.f);
-    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, 150.f);
+    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, 200.f);
     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.f);
     ImGui::TableHeadersRow();
     int lastGroup = -2;
@@ -345,23 +418,29 @@ void drawSquadTab() {
     }
     ImGui::EndTable();
   }
+  popTableBorderColors();
 }
 
 void drawRolesTab() {
   auto board = buildBoard(gRoles, gAssign, gRoster.members(), gNeed);
-  if (ImGui::BeginTable("board", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+  pushTableBorderColors();
+  if (ImGui::BeginTable("board", 4, kTableFlags)) {
     ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthStretch, 1.4f);
     ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthStretch, 3.f);
     ImGui::TableSetupColumn("Need", ImGuiTableColumnFlags_WidthFixed, 80.f);
-    ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 70.f);
+    ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 80.f);
     ImGui::TableHeadersRow();
     for (const auto& r : board) {
       ImGui::PushID(r.role.code.c_str());
       ImGui::TableNextRow(); ImGui::TableNextColumn();
       if (drawRoleIcon(r.role.icon, 18.f)) ImGui::SameLine();
-      ImGui::Text("%s", r.role.label.c_str());
+      // clicking anywhere on the row copies this role's players ("Name1, Name2 - Role"); +/- below stay clickable
+      if (ImGui::Selectable(r.role.label.c_str(), false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap))
+        copyText(copyOneRole(gRoles, gAssign, gRoster.members(), r.role.code), r.role.label);
+      if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to copy the players in this role");
       ImGui::TableNextColumn();
-      std::string s; for (auto& h : r.holders) s += (s.empty() ? "" : ", ") + h;
+      std::string s;
+      for (auto& h : r.holders) s += (s.empty() ? "" : ", ") + h + (gAssign.isTank(h) ? " (tank)" : "");
       if (s.empty()) ImGui::TextDisabled("-"); else ImGui::TextWrapped("%s", s.c_str());
       ImGui::TableNextColumn();
       int need = r.need;
@@ -378,33 +457,47 @@ void drawRolesTab() {
     }
     ImGui::EndTable();
   }
+  popTableBorderColors();
   int unassigned = 0; for (auto& m : gRoster.members()) if (gAssign.get(m.account.empty() ? m.character : m.account).empty()) ++unassigned;
   ImGui::Text("%d squad members without a role", unassigned);
   ImGui::SameLine();
   if (ImGui::Button("Assign unassigned as DPS")) assignUnassignedDps();
   ImGui::SameLine();
-  if (ImGui::Button("Clear all roles")) { gAssign.clear(); saveAssignments(); }
-  ImGui::TextDisabled("Need = how many seats you want filled; 0 means no target.");
+  if (ImGui::Button("Clear all roles")) { gAssign.clear(); saveAssignments(); refreshSnapshot(); }
+  ImGui::TextDisabled("Need = how many seats you want filled; 0 means no target. Click a role row to copy its players.");
 }
 
 void drawChangesTab() {
-  if (gChangeSummary.empty()) { ImGui::TextDisabled("Nothing yet. Each Update from clipboard shows here who joined or left since the previous list."); return; }
-  ImGui::Text("Last update: %s", gChangeSummary.c_str());
-  if (gChanges.empty()) return;
-  for (const auto& c : gChanges) {
-    const Member& m = (c.kind == Change::Left) ? c.before : c.now;
-    std::string who = m.account.empty() ? m.character : m.account;
-    Standing st = Watchlist::standing(gWatch.match(m.account, m.character));
-    switch (c.kind) {
-      case Change::Joined: ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.5f, 1), "+ joined"); break;
-      case Change::Left: ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1), "- left"); break;
-      case Change::Moved: ImGui::TextColored(ImVec4(0.6f, 0.8f, 1, 1), "~ moved %d -> %d", c.before.subgroup + 1, c.now.subgroup + 1); break;
-      case Change::CharacterChanged: ImGui::TextColored(ImVec4(0.6f, 0.8f, 1, 1), "~ character %s -> %s", c.before.character.c_str(), c.now.character.c_str()); break;
+  if (ImGui::Button("Clear change log")) { gLog.clear(); saveHistory(); gStatus = "Change log cleared"; }
+  ImGui::SameLine(); ImGui::TextDisabled("Last %d updates. Click an entry to copy the roles that left.", (int)ChangeLog::kMax);
+  if (gLog.entries().empty()) { ImGui::TextDisabled("Nothing yet. Each Update from clipboard that adds or removes people is logged here."); return; }
+  int idx = 0;
+  for (const auto& e : gLog.entries()) {
+    ImGui::PushID(idx++);
+    ImGui::BeginGroup();
+    ImGui::Separator();
+    ImGui::Text("[%s]  +%d joined, -%d left", e.time.c_str(), (int)e.joined.size(), (int)e.left.size());
+    std::string roles = leftRolesDisplay(e, gRoles);
+    if (!roles.empty()) ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.40f, 1), "  Roles left: %s", roles.c_str());
+    for (const auto& l : e.left) {
+      const std::string& who = l.m.account.empty() ? l.m.character : l.m.account;
+      Standing st = Watchlist::standing(gWatch.match(l.m.account, l.m.character));
+      ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1), "  - left");
+      ImGui::SameLine(); ImGui::TextColored(standingColor(st), "%s", who.c_str());
+      ImGui::SameLine(); ImGui::TextDisabled("(%s)", l.role.empty() ? "unassigned" : gRoles.labelOf(l.role).c_str());
     }
-    ImGui::SameLine(); ImGui::TextColored(standingColor(st), "%s", who.c_str());
-    if (st != Standing::None) { ImGui::SameLine(); ImGui::TextColored(standingColor(st), "[%s]", standingLabel(st)); }
-    std::string role = gAssign.get(who);
-    if (!role.empty()) { ImGui::SameLine(); ImGui::TextDisabled("(%s)", gRoles.labelOf(role).c_str()); }
+    for (const auto& n : e.joined) {
+      Standing st = Watchlist::standing(gWatch.match(n, ""));
+      ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.5f, 1), "  + joined");
+      ImGui::SameLine(); ImGui::TextColored(standingColor(st), "%s", n.c_str());
+    }
+    ImGui::EndGroup();
+    if (ImGui::IsItemHovered()) {
+      std::string clip = leftRolesClipboard(e, gRoles);
+      ImGui::SetTooltip("%s", clip.empty() ? "Nobody left in this update" : ("Click to copy: " + clip).c_str());
+      if (ImGui::IsMouseClicked(0)) copyText(clip, "roles that left");
+    }
+    ImGui::PopID();
   }
 }
 
@@ -418,7 +511,7 @@ void renderWindow() {
   if (ImGui::Button("Update from clipboard")) doUpdate();
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Replaces the squad with the list on the clipboard (Account.1234, Character per line).\nAccounts missing from it are treated as having left. Subgroups and roles are kept.");
   ImGui::SameLine(); if (ImGui::Button("Reload watchlist")) { loadWatchlist(); gStatus = "Watchlist: " + gWatchStatus; }
-  ImGui::SameLine(); if (ImGui::Button("Clear list")) { gRoster.clear(); gChanges.clear(); gChangeSummary.clear(); saveSquad(); gStatus = "Squad cleared"; }
+  ImGui::SameLine(); if (ImGui::Button("Clear list")) { gRoster.clear(); gSnap.clear(); gSnapValid = false; saveSquad(); saveSnapshot(); gStatus = "Squad cleared"; }
   ImGui::Text("%d members", (int)gRoster.size());
   int b = countStanding(Standing::Blocked), f = countStanding(Standing::Flagged), t = countStanding(Standing::Trusted);
   if (b) { ImGui::SameLine(); ImGui::TextColored(standingColor(Standing::Blocked), "  %d blocked", b); }
@@ -468,7 +561,7 @@ void AddonLoad(AddonAPI_t* api) {
   gDir = fs::u8path(dir ? dir : ".");
   std::error_code ec; fs::create_directories(gDir, ec);
 
-  loadConfig(); loadWatchlist(); loadAssignments(); loadSquad();
+  loadConfig(); loadWatchlist(); loadAssignments(); loadSquad(); loadHistoryAndSnapshot();
 
   api->GUI_Register(RT_Render, renderWindow);
   api->GUI_Register(RT_OptionsRender, renderOptions);

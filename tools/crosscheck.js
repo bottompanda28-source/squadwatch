@@ -14,7 +14,7 @@ function grab(name) {
 }
 const ctx = {};
 vm.createContext(ctx);
-vm.runInContext(['wlNormKey', 'trimNameDecor', 'wlCandidateVariants'].map(grab).join('\n'), ctx);
+vm.runInContext(['wlNormKey', 'trimNameDecor', 'wlCandidateVariants', 'stripAccountSuffix'].map(grab).join('\n'), ctx);
 
 const corpus = [];
 const wlSrc = fs.readFileSync(wl, 'utf8');
@@ -36,5 +36,10 @@ lines.forEach((l, i) => {
   const exp = ctx.wlCandidateVariants(l).join('\x1f');
   if (exp !== out[i]) { if (bad++ < 15) console.log('MISMATCH', JSON.stringify(l), '\n  js :', JSON.stringify(exp), '\n  c++:', JSON.stringify(out[i])); }
 });
+const out2 = cp.execFileSync(bin, [inFile, 'strip'], { maxBuffer: 1 << 28 }).toString('utf8').split('\n');
+let bad2 = 0;
+lines.forEach((l, i) => { const exp = ctx.stripAccountSuffix(l); if (exp !== out2[i]) { if (bad2++ < 10) console.log('STRIP MISMATCH', JSON.stringify(l), JSON.stringify(exp), JSON.stringify(out2[i])); } });
+console.log('stripAccountSuffix mismatches', bad2);
+bad += bad2;
 console.log(`corpus ${lines.length} (real names ${real}); mismatches ${bad}`);
 process.exit(bad ? 1 : 0);

@@ -8,6 +8,7 @@ int main(int argc, char** argv) {
   std::string line;
   while (std::getline(in, line)) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (argc > 2 && std::string(argv[2]) == "strip") { std::cout << sw::stripAccountSuffix(line) << '\n'; continue; }
     auto v = sw::candidateVariants(line);
     for (size_t i = 0; i < v.size(); ++i) { if (i) std::cout << '\x1f'; std::cout << v[i]; }
     std::cout << '\n';

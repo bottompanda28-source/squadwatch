@@ -2,6 +2,7 @@
 // Role template (exported from the composer) + assignments + role board.
 #include "roster.hpp"
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,7 @@ struct RoleDef {
   std::string label;      // e.g. "Quick Heal"
   std::string roleClass;  // heal / boondps / dps / specialty (used to pick role-relevant tags)
   std::string icon;       // icon id (see role_icons.hpp), may be empty
+  std::string shortName;  // compact form without spaces, used in the "left roles" clipboard text
 };
 
 class RoleSet {
@@ -29,13 +31,16 @@ class Assignments {
  public:
   void set(const std::string& account, const std::string& code);  // empty code clears
   std::string get(const std::string& account) const;
-  void clear() { map_.clear(); }
+  void clear() { map_.clear(); tanks_.clear(); }
+  bool isTank(const std::string& account) const;
+  void setTank(const std::string& account, bool on);
   void prune(const std::vector<Member>& present);  // optional: drop people no longer in squad
   std::string toJson() const;
   bool loadFromJson(const std::string& text, std::string* err = nullptr);
   const std::map<std::string, std::string>& raw() const { return map_; }
  private:
   std::map<std::string, std::string> map_;  // normKey(account) -> role code
+  std::set<std::string> tanks_;              // normKey(account) of players marked as tank
 };
 
 struct BoardRow {
@@ -47,5 +52,11 @@ struct BoardRow {
 };
 std::vector<BoardRow> buildBoard(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present,
                                  const std::map<std::string, int>& need);
+
+
+// Composer-style "copy by role" text: "Name1, Name2 - Role Label; Name3 - Other Role" (account numbers removed).
+// roleClass: "" = every role, otherwise heal / boondps / dps / specialty. Only assigned members are included.
+std::string copyByRole(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present, const std::string& roleClass);
+std::string copyOneRole(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present, const std::string& code);
 
 }
