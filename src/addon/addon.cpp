@@ -3,6 +3,7 @@
 #include "Nexus.h"
 #include "imgui.h"
 #include "icon_png.hpp"
+#include "role_icons.hpp"
 #include "../core/roles.hpp"
 #include "../core/roster.hpp"
 #include "../core/text.hpp"
@@ -13,6 +14,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <sstream>
 
@@ -27,8 +29,7 @@ constexpr const char* kName = "Squad Watch";
 constexpr const char* kWindow = "Squad Watch";
 constexpr const char* kKbToggle = "KB_SQUADWATCH_TOGGLE";
 constexpr const char* kKbCopy = "KB_SQUADWATCH_COPY";
-constexpr const char* kKbPaste = "KB_SQUADWATCH_PASTE";
-constexpr const char* kKbSnap = "KB_SQUADWATCH_SNAPSHOT";
+constexpr const char* kKbUpdate = "KB_SQUADWATCH_UPDATE";
 constexpr const char* kQa = "QA_SQUADWATCH";
 constexpr const char* kTexN = "TEX_SQUADWATCH_N";
 constexpr const char* kTexH = "TEX_SQUADWATCH_H";
@@ -40,16 +41,18 @@ std::deque<Event> gEvents;
 
 Roster gRoster;
 Watchlist gWatch;
-RoleSet gRoles;
+RoleSet gRoles = RoleSet::defaults();
 Assignments gAssign;
-Snapshot gSnap;
-bool gHaveSnap = false;
+std::map<std::string, int> gNeed;      // role code -> seats wanted (0 = no target)
+std::vector<Change> gChanges;          // what the last "Update from clipboard" changed
+std::string gChangeSummary;
+bool gUseLive = false;                 // ArcDPS live squad events (off: the clipboard list is the truth)
 CopyOptions gCopy;
 bool gVisible = false;
 bool gShowTags = true, gShowNotes = true;
 int gMaxTags = 3;
 std::string gStatus;
-std::string gWatchStatus, gRolesStatus;
+std::string gWatchStatus;
 fs::path gDir;
 
 fs::path P(const char* f) { return gDir / fs::u8path(f); }
@@ -105,11 +108,14 @@ std::string clipboardRead() {
 // ---- persistence ----
 void saveAssignments() { if (!writeFile(P("assignments.json"), gAssign.toJson())) logI("could not write assignments.json"); }
 
+void saveSquad() { writeFile(P("squad.json"), gRoster.toJson()); }
+void loadSquad() { bool ok; std::string t = readFile(P("squad.json"), &ok); if (ok) gRoster.loadFromJson(t); }
+
 void saveConfig() {
   nlohmann::json j;
   j["colonPrefix"] = gCopy.colonPrefix; j["includeCharacter"] = gCopy.includeCharacter; j["includeSubgroup"] = gCopy.includeSubgroup;
   j["sortBySubgroup"] = gCopy.sortBySubgroup; j["colSep"] = gCopy.colSep; j["rowSep"] = gCopy.rowSep;
-  j["showTags"] = gShowTags; j["showNotes"] = gShowNotes; j["maxTags"] = gMaxTags; j["visible"] = gVisible;
+  j["useLive"] = gUseLive; j["need"] = gNeed; j["showTags"] = gShowTags; j["showNotes"] = gShowNotes; j["maxTags"] = gMaxTags; j["visible"] = gVisible;
   writeFile(P("config.json"), j.dump(2));
 }
 void loadConfig() {
@@ -121,22 +127,20 @@ void loadConfig() {
     auto s = [&](const char* k, std::string& v) { if (j.contains(k) && j[k].is_string()) v = j[k].get<std::string>(); };
     b("colonPrefix", gCopy.colonPrefix); b("includeCharacter", gCopy.includeCharacter); b("includeSubgroup", gCopy.includeSubgroup);
     b("sortBySubgroup", gCopy.sortBySubgroup); s("colSep", gCopy.colSep); s("rowSep", gCopy.rowSep);
-    b("showTags", gShowTags); b("showNotes", gShowNotes); b("visible", gVisible);
+    b("useLive", gUseLive); b("showTags", gShowTags); b("showNotes", gShowNotes); b("visible", gVisible);
+    if (j.contains("need") && j["need"].is_object())
+      for (auto it = j["need"].begin(); it != j["need"].end(); ++it) if (it.value().is_number_integer()) gNeed[it.key()] = std::max(0, std::min(50, it.value().get<int>()));
     if (j.contains("maxTags") && j["maxTags"].is_number_integer()) gMaxTags = std::min(6, std::max(0, j["maxTags"].get<int>()));
   } catch (...) { logI("config.json unreadable, using defaults"); }
 }
 
 void loadWatchlist() {
-  bool ok; std::string t = readFile(P("watchlist.json"), &ok), err;
-  if (!ok) { gWatchStatus = "watchlist.json not found in the addon folder"; return; }
+  // The watchlist page saves its export as gw2-watchlist-data.json; an older name is still accepted.
+  bool ok = false; std::string t, err;
+  for (const char* name : {"gw2-watchlist-data.json", "watchlist.json"}) { t = readFile(P(name), &ok); if (ok) break; }
+  if (!ok) { gWatchStatus = "gw2-watchlist-data.json not found in the addon folder"; return; }
   if (gWatch.loadFromJson(t, &err)) gWatchStatus = std::to_string(gWatch.playerCount()) + " players loaded";
   else gWatchStatus = err;
-}
-void loadRoles() {
-  bool ok; std::string t = readFile(P("roles.json"), &ok), err;
-  if (!ok) { gRolesStatus = "roles.json not found in the addon folder"; return; }
-  if (gRoles.loadFromJson(t, &err)) gRolesStatus = std::to_string(gRoles.roles().size()) + " roles loaded";
-  else gRolesStatus = err;
 }
 void loadAssignments() { bool ok; std::string t = readFile(P("assignments.json"), &ok); if (ok) gAssign.loadFromJson(t); }
 
@@ -144,38 +148,61 @@ void loadAssignments() { bool ok; std::string t = readFile(P("assignments.json")
 void drainEvents() {
   std::deque<Event> local;
   { std::lock_guard<std::mutex> lk(gMutex); local.swap(gEvents); }
+  if (!gUseLive) return;                       // events are ignored unless enabled in options
+  bool changed = false;
   for (const auto& e : local) {
+    changed = true;
     if (e.kind == Event::Join) gRoster.join(e.account, e.character, e.subgroup);
     else if (e.self) gRoster.clearLive();
     else gRoster.leave(e.account);
   }
+  if (changed) saveSquad();
 }
 
 void doCopy() {
-  drainEvents();
   if (gRoster.size() == 0) { gStatus = "Nothing to copy: squad list is empty"; alert(gStatus); return; }
   if (clipboardWrite(formatList(gRoster.members(), gCopy))) gStatus = "Copied " + std::to_string(gRoster.size()) + " members to the clipboard";
   else gStatus = "Could not open the clipboard";
   alert(gStatus);
 }
-void doPaste(bool replace) {
+
+// The clipboard list (e.g. from Squad Attendance) is the truth: accounts missing from it have left the squad.
+void doUpdate() {
   auto list = parsePaste(clipboardRead());
   if (list.empty()) { gStatus = "Clipboard has no recognisable names"; alert(gStatus); return; }
-  if (replace) gRoster.replaceWithPaste(list); else gRoster.mergePaste(list);
-  gStatus = "Imported " + std::to_string(list.size()) + " names from the clipboard";
+  bool first = gRoster.size() == 0;
+  gChanges = gRoster.applyUpdate(list);
+  gAssign.prune(gRoster.members());
+  int j = 0, l = 0, c = 0;
+  for (auto& ch : gChanges) { j += ch.kind == Change::Joined; l += ch.kind == Change::Left; c += ch.kind == Change::CharacterChanged; }
+  gChangeSummary = first ? "First list: no earlier squad to compare with" : ("+" + std::to_string(j) + " joined, -" + std::to_string(l) + " left, " + std::to_string(c) + " changed character");
+  gStatus = "Updated: " + std::to_string(gRoster.size()) + " members" + (first ? "" : " (" + gChangeSummary + ")");
+  saveSquad(); saveAssignments();
   alert(gStatus);
 }
-void doSnapshot() {
-  drainEvents();
-  gSnap.members = gRoster.members(); gSnap.label = "snapshot"; gHaveSnap = true;
-  gStatus = "Snapshot taken (" + std::to_string(gSnap.members.size()) + " members)";
-  alert(gStatus);
+
+void removeMember(const Member& m) {
+  const std::string who = m.account.empty() ? m.character : m.account;
+  gRoster.remove(who); gAssign.set(who, "");
+  saveSquad(); saveAssignments();
+}
+void setSubgroup(const Member& m, int sg) {
+  gRoster.setSubgroup(m.account.empty() ? m.character : m.account, sg);
+  saveSquad();
+}
+void assignUnassignedDps() {
+  int n = 0;
+  for (const auto& m : gRoster.members()) {
+    const std::string& who = m.account.empty() ? m.character : m.account;
+    if (gAssign.get(who).empty()) { gAssign.set(who, "dps"); ++n; }
+  }
+  saveAssignments();
+  gStatus = "Assigned DPS to " + std::to_string(n) + " players";
 }
 
 void kbToggle(const char*, bool rel) { if (!rel) { gVisible = !gVisible; } }
 void kbCopy(const char*, bool rel) { if (!rel) doCopy(); }
-void kbPaste(const char*, bool rel) { if (!rel) doPaste(false); }
-void kbSnap(const char*, bool rel) { if (!rel) doSnapshot(); }
+void kbUpdate(const char*, bool rel) { if (!rel) doUpdate(); }
 
 // ArcDPS squad events relayed by Nexus. May be called off the render thread: only queue here.
 struct EvAgentUpdate {
@@ -211,6 +238,15 @@ const char* standingLabel(Standing s) {
   switch (s) { case Standing::Blocked: return "BLOCKED"; case Standing::Flagged: return "FLAGGED"; case Standing::Trusted: return "TRUSTED"; default: return ""; }
 }
 
+// Role icons are registered as textures at load; fetch each frame (the texture may finish loading later).
+bool drawRoleIcon(const std::string& icon, float size) {
+  if (icon.empty() || !gApi) return false;
+  Texture_t* t = gApi->Textures_Get(("TEX_SQUADWATCH_ROLE_" + icon).c_str());
+  if (!t || !t->Resource) return false;
+  ImGui::Image((ImTextureID)t->Resource, ImVec2(size, size));
+  return true;
+}
+
 void drawTags(const WlEntry& e, const std::string& roleClass) {
   VisibleTags v = gWatch.pickVisibleTags(e, roleClass, (size_t)gMaxTags);
   for (size_t i = 0; i < v.shown.size(); ++i) {
@@ -235,8 +271,8 @@ void drawMemberRow(const Member& m, int idx) {
   std::string cls = gRoles.classOf(role);
 
   ImGui::TableNextRow();
-  ImGui::TableNextColumn();
   ImGui::PushID(idx);
+  ImGui::TableNextColumn();
   ImGui::TextColored(standingColor(st), "%s", who.c_str());
   if (!m.account.empty() && !m.character.empty()) { ImGui::SameLine(); ImGui::TextDisabled("%s", m.character.c_str()); }
   if (e && ImGui::IsItemHovered()) {
@@ -246,39 +282,64 @@ void drawMemberRow(const Member& m, int idx) {
   }
   ImGui::TableNextColumn();
   if (st != Standing::None) ImGui::TextColored(standingColor(st), "%s", standingLabel(st));
-  if (e && gShowTags) {
-    if (st != Standing::None) ImGui::SameLine();
-    drawTags(*e, cls);
-  }
+  if (e && gShowTags) { if (st != Standing::None) ImGui::SameLine(); drawTags(*e, cls); }
+
+  // subgroup
   ImGui::TableNextColumn();
+  std::string sgLabel = m.subgroup >= 0 ? "Sub " + std::to_string(m.subgroup + 1) : std::string("Sub -");
+  if (ImGui::SmallButton((sgLabel + "##sg").c_str())) ImGui::OpenPopup("sgpick");
+  if (ImGui::BeginPopup("sgpick")) {
+    ImGui::TextDisabled("%s: subgroup", who.c_str());
+    for (int g = 0; g < 10; ++g) {
+      if (g % 5) ImGui::SameLine();
+      if (ImGui::Button(std::to_string(g + 1).c_str(), ImVec2(30, 0))) { setSubgroup(m, g); ImGui::CloseCurrentPopup(); }
+    }
+    if (ImGui::Button("None", ImVec2(60, 0))) { setSubgroup(m, -1); ImGui::CloseCurrentPopup(); }
+    ImGui::EndPopup();
+  }
+
+  // role
+  ImGui::TableNextColumn();
+  const RoleDef* rd = gRoles.find(role);
+  if (rd && drawRoleIcon(rd->icon, 18.f)) ImGui::SameLine();
   std::string label = role.empty() ? "-" : gRoles.labelOf(role);
   if (ImGui::SmallButton((label + "##role").c_str())) ImGui::OpenPopup("rolepick");
   if (ImGui::BeginPopup("rolepick")) {
     ImGui::TextDisabled("%s", who.c_str());
     if (ImGui::Selectable("(none)", role.empty())) { gAssign.set(who, ""); saveAssignments(); }
-    for (const auto& r : gRoles.roles())
+    for (const auto& r : gRoles.roles()) {
+      if (drawRoleIcon(r.icon, 16.f)) ImGui::SameLine();
       if (ImGui::Selectable(r.label.c_str(), role == r.code)) { gAssign.set(who, r.code); saveAssignments(); }
-    if (gRoles.roles().empty()) ImGui::TextDisabled("No roles loaded (roles.json)");
+    }
     ImGui::EndPopup();
   }
+
+  ImGui::TableNextColumn();
+  if (ImGui::SmallButton("X##rm")) { removeMember(m); }
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove from squad");
   ImGui::PopID();
 }
 
 void drawSquadTab() {
+  if (ImGui::Button("Copy squad")) doCopy();
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies the list to the clipboard using the format set in Nexus options");
   std::vector<Member> list = gRoster.sorted();
-  if (list.empty()) { ImGui::TextDisabled("Squad is empty. Join a squad with ArcDPS running, or use Paste import."); return; }
-  if (ImGui::BeginTable("squad", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+  if (list.empty()) { ImGui::TextDisabled("Squad is empty. Copy the list from Squad Attendance, then press Update from clipboard."); return; }
+  if (ImGui::BeginTable("squad", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
     ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch, 2.f);
     ImGui::TableSetupColumn("Watchlist", ImGuiTableColumnFlags_WidthStretch, 2.f);
-    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, 110.f);
+    ImGui::TableSetupColumn("Sub", ImGuiTableColumnFlags_WidthFixed, 55.f);
+    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, 150.f);
+    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.f);
     ImGui::TableHeadersRow();
     int lastGroup = -2;
     for (size_t i = 0; i < list.size(); ++i) {
       if (list[i].subgroup != lastGroup) {
         lastGroup = list[i].subgroup;
+        int n = 0; for (auto& m : list) if (m.subgroup == lastGroup) ++n;
         ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
         ImGui::TableNextColumn();
-        if (lastGroup >= 0) ImGui::Text("Subgroup %d", lastGroup + 1); else ImGui::Text("Subgroup unknown");
+        if (lastGroup >= 0) ImGui::Text("Subgroup %d  (%d)", lastGroup + 1, n); else ImGui::Text("No subgroup  (%d)", n);
       }
       drawMemberRow(list[i], (int)i);
     }
@@ -287,40 +348,53 @@ void drawSquadTab() {
 }
 
 void drawRolesTab() {
-  if (gRoles.roles().empty()) { ImGui::TextDisabled("No roles loaded. Put roles.json (exported from the composer) in the addon folder, then press Reload."); return; }
-  auto board = buildBoard(gRoles, gAssign, gRoster.members());
-  if (ImGui::BeginTable("board", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
-    ImGui::TableSetupColumn("Role"); ImGui::TableSetupColumn("Filled"); ImGui::TableSetupColumn("Players");
+  auto board = buildBoard(gRoles, gAssign, gRoster.members(), gNeed);
+  if (ImGui::BeginTable("board", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+    ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthStretch, 3.f);
+    ImGui::TableSetupColumn("Need", ImGuiTableColumnFlags_WidthFixed, 80.f);
+    ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 70.f);
     ImGui::TableHeadersRow();
     for (const auto& r : board) {
+      ImGui::PushID(r.role.code.c_str());
       ImGui::TableNextRow(); ImGui::TableNextColumn();
-      ImGui::Text("%s%s", r.role.label.c_str(), r.role.mandatory ? " *" : "");
-      ImGui::TableNextColumn();
-      int have = (int)r.holders.size();
-      ImVec4 c = r.open > 0 ? (r.role.mandatory ? ImVec4(0.95f, 0.35f, 0.35f, 1) : ImVec4(0.95f, 0.75f, 0.3f, 1)) : (r.over ? ImVec4(0.6f, 0.8f, 1, 1) : ImVec4(0.45f, 0.85f, 0.5f, 1));
-      ImGui::TextColored(c, "%d / %d%s", have, r.role.count, r.open > 0 ? "  OPEN" : "");
+      if (drawRoleIcon(r.role.icon, 18.f)) ImGui::SameLine();
+      ImGui::Text("%s", r.role.label.c_str());
       ImGui::TableNextColumn();
       std::string s; for (auto& h : r.holders) s += (s.empty() ? "" : ", ") + h;
-      ImGui::TextWrapped("%s", s.c_str());
+      if (s.empty()) ImGui::TextDisabled("-"); else ImGui::TextWrapped("%s", s.c_str());
+      ImGui::TableNextColumn();
+      int need = r.need;
+      if (ImGui::SmallButton("-") && need > 0) { gNeed[r.role.code] = need - 1; saveConfig(); }
+      ImGui::SameLine(); ImGui::Text("%d", need);
+      ImGui::SameLine(); if (ImGui::SmallButton("+") && need < 50) { gNeed[r.role.code] = need + 1; saveConfig(); }
+      ImGui::TableNextColumn();
+      int have = (int)r.holders.size();
+      if (r.need == 0) ImGui::TextDisabled("%d", have);
+      else if (r.open > 0) ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1), "%d/%d OPEN", have, r.need);
+      else if (r.over > 0) ImGui::TextColored(ImVec4(0.6f, 0.8f, 1, 1), "%d/%d +%d", have, r.need, r.over);
+      else ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.5f, 1), "%d/%d ok", have, r.need);
+      ImGui::PopID();
     }
     ImGui::EndTable();
   }
-  ImGui::TextDisabled("* = mandatory");
   int unassigned = 0; for (auto& m : gRoster.members()) if (gAssign.get(m.account.empty() ? m.character : m.account).empty()) ++unassigned;
   ImGui::Text("%d squad members without a role", unassigned);
-  if (ImGui::SmallButton("Clear all assignments")) { gAssign.clear(); saveAssignments(); }
+  ImGui::SameLine();
+  if (ImGui::Button("Assign unassigned as DPS")) assignUnassignedDps();
+  ImGui::SameLine();
+  if (ImGui::Button("Clear all roles")) { gAssign.clear(); saveAssignments(); }
+  ImGui::TextDisabled("Need = how many seats you want filled; 0 means no target.");
 }
 
 void drawChangesTab() {
-  if (!gHaveSnap) { ImGui::TextDisabled("No snapshot yet. Press \"Snapshot\" now; take another later to see who joined or left."); return; }
-  auto ch = diffSnapshot(gSnap, gRoster.members());
-  ImGui::Text("Compared with snapshot of %d members", (int)gSnap.members.size());
-  if (ch.empty()) { ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.5f, 1), "No changes"); return; }
-  for (const auto& c : ch) {
+  if (gChangeSummary.empty()) { ImGui::TextDisabled("Nothing yet. Each Update from clipboard shows here who joined or left since the previous list."); return; }
+  ImGui::Text("Last update: %s", gChangeSummary.c_str());
+  if (gChanges.empty()) return;
+  for (const auto& c : gChanges) {
     const Member& m = (c.kind == Change::Left) ? c.before : c.now;
     std::string who = m.account.empty() ? m.character : m.account;
-    const WlEntry* e = gWatch.match(m.account, m.character);
-    Standing st = Watchlist::standing(e);
+    Standing st = Watchlist::standing(gWatch.match(m.account, m.character));
     switch (c.kind) {
       case Change::Joined: ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.5f, 1), "+ joined"); break;
       case Change::Left: ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1), "- left"); break;
@@ -339,14 +413,12 @@ int countStanding(Standing s) { int n = 0; for (auto& m : gRoster.members()) if 
 void renderWindow() {
   drainEvents();
   if (!gVisible) return;
-  ImGui::SetNextWindowSize(ImVec2(640, 420), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(700, 440), ImGuiCond_FirstUseEver);
   if (!ImGui::Begin(kWindow, &gVisible, ImGuiWindowFlags_None)) { ImGui::End(); return; }
-  if (ImGui::Button("Copy squad")) doCopy();
-  ImGui::SameLine(); if (ImGui::Button("Paste import")) doPaste(false);
-  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reads names from the clipboard (Account.1234, Character per line) and adds them to the list");
-  ImGui::SameLine(); if (ImGui::Button("Snapshot")) doSnapshot();
-  ImGui::SameLine(); if (ImGui::Button("Reload files")) { loadWatchlist(); loadRoles(); loadAssignments(); gStatus = "Reloaded"; }
-  ImGui::SameLine(); if (ImGui::Button("Clear list")) { gRoster.clear(); gStatus = "Roster cleared"; }
+  if (ImGui::Button("Update from clipboard")) doUpdate();
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Replaces the squad with the list on the clipboard (Account.1234, Character per line).\nAccounts missing from it are treated as having left. Subgroups and roles are kept.");
+  ImGui::SameLine(); if (ImGui::Button("Reload watchlist")) { loadWatchlist(); gStatus = "Watchlist: " + gWatchStatus; }
+  ImGui::SameLine(); if (ImGui::Button("Clear list")) { gRoster.clear(); gChanges.clear(); gChangeSummary.clear(); saveSquad(); gStatus = "Squad cleared"; }
   ImGui::Text("%d members", (int)gRoster.size());
   int b = countStanding(Standing::Blocked), f = countStanding(Standing::Flagged), t = countStanding(Standing::Trusted);
   if (b) { ImGui::SameLine(); ImGui::TextColored(standingColor(Standing::Blocked), "  %d blocked", b); }
@@ -378,11 +450,11 @@ void renderOptions() {
   dirty |= ImGui::Checkbox("Show watchlist tags", &gShowTags);
   dirty |= ImGui::Checkbox("Show notes in tooltips", &gShowNotes);
   dirty |= ImGui::SliderInt("Tags shown per player", &gMaxTags, 0, 6);
+  dirty |= ImGui::Checkbox("Also follow ArcDPS live squad events (experimental)", &gUseLive);
   ImGui::Separator();
   ImGui::TextDisabled("Watchlist: %s", gWatchStatus.c_str());
-  ImGui::TextDisabled("Roles: %s", gRolesStatus.c_str());
   ImGui::TextDisabled("Data folder: %s", gDir.u8string().c_str());
-  if (ImGui::Button("Reload files")) { loadWatchlist(); loadRoles(); loadAssignments(); }
+  if (ImGui::Button("Reload watchlist")) loadWatchlist();
   if (dirty) saveConfig();
 }
 
@@ -396,26 +468,26 @@ void AddonLoad(AddonAPI_t* api) {
   gDir = fs::u8path(dir ? dir : ".");
   std::error_code ec; fs::create_directories(gDir, ec);
 
-  loadConfig(); loadWatchlist(); loadRoles(); loadAssignments();
+  loadConfig(); loadWatchlist(); loadAssignments(); loadSquad();
 
   api->GUI_Register(RT_Render, renderWindow);
   api->GUI_Register(RT_OptionsRender, renderOptions);
   api->GUI_RegisterCloseOnEscape(kWindow, &gVisible);
 
-  // Unbound by default so nothing clashes; bind them under Nexus > Options > Keybinds.
-  Keybind_t none{0, false, false, false};
-  api->InputBinds_RegisterWithStruct(kKbToggle, kbToggle, none);
-  api->InputBinds_RegisterWithStruct(kKbCopy, kbCopy, none);
-  api->InputBinds_RegisterWithStruct(kKbPaste, kbPaste, none);
-  api->InputBinds_RegisterWithStruct(kKbSnap, kbSnap, none);
+  // "(null)" is Nexus's own spelling of "unbound": no key is claimed and no bogus "[...]" shows in tooltips.
+  api->InputBinds_RegisterWithString(kKbToggle, kbToggle, "(null)");
+  api->InputBinds_RegisterWithString(kKbCopy, kbCopy, "(null)");
+  api->InputBinds_RegisterWithString(kKbUpdate, kbUpdate, "(null)");
 
   api->Textures_GetOrCreateFromMemory(kTexN, (void*)kIconNormal, sizeof kIconNormal);
   api->Textures_GetOrCreateFromMemory(kTexH, (void*)kIconHover, sizeof kIconHover);
   api->QuickAccess_Add(kQa, kTexN, kTexH, kKbToggle, "Squad Watch");
+  for (const auto& ic : kRoleIcons)
+    api->Textures_GetOrCreateFromMemory((std::string("TEX_SQUADWATCH_ROLE_") + ic.id).c_str(), (void*)ic.data, ic.size);
 
   api->Events_Subscribe("EV_ARCDPS_SQUAD_JOIN", onJoin);
   api->Events_Subscribe("EV_ARCDPS_SQUAD_LEAVE", onLeave);
-  api->Events_Subscribe("EV_REPLAY_ARCDPS_SQUAD_JOIN", onJoin);  // catch up on members who joined before we loaded
+  api->Events_Subscribe("EV_REPLAY_ARCDPS_SQUAD_JOIN", onJoin);
   logI("loaded");
 }
 
@@ -426,8 +498,7 @@ void AddonUnload() {
   gApi->Events_Unsubscribe("EV_ARCDPS_SQUAD_LEAVE", onLeave);
   gApi->Events_Unsubscribe("EV_REPLAY_ARCDPS_SQUAD_JOIN", onJoin);
   gApi->QuickAccess_Remove(kQa);
-  gApi->InputBinds_Deregister(kKbToggle); gApi->InputBinds_Deregister(kKbCopy);
-  gApi->InputBinds_Deregister(kKbPaste); gApi->InputBinds_Deregister(kKbSnap);
+  gApi->InputBinds_Deregister(kKbToggle); gApi->InputBinds_Deregister(kKbCopy); gApi->InputBinds_Deregister(kKbUpdate);
   gApi->GUI_DeregisterCloseOnEscape(kWindow);
   gApi->GUI_Deregister(renderOptions);
   gApi->GUI_Deregister(renderWindow);
@@ -435,8 +506,8 @@ void AddonUnload() {
 }
 
 AddonDefinition_t gDef = {
-  0x53515744, NEXUS_API_VERSION, kName, {0, 1, 0, 0}, "Squad Watch contributors",
-  "Squad list with watchlist markers, role assignment, change report and copy-to-clipboard. Works with ArcDPS squad events or pasted lists.",
+  0x53515744, NEXUS_API_VERSION, kName, {0, 2, 0, 0}, "Squad Watch contributors",
+  "Squad list with watchlist markers, subgroups, role assignment and change report. Update the squad from the clipboard.",
   AddonLoad, AddonUnload, AF_None, UP_None, nullptr
 };
 

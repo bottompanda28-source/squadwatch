@@ -6,27 +6,27 @@
 namespace sw {
 using nlohmann::json;
 
-bool RoleSet::loadFromJson(const std::string& text, std::string* err) {
-  json root;
-  try { root = json::parse(text); }
-  catch (const std::exception& ex) { if (err) *err = std::string("Not valid JSON: ") + ex.what(); return false; }
-  const json* arr = nullptr;
-  if (root.is_array()) arr = &root;
-  else if (root.is_object() && root.contains("roles") && root["roles"].is_array()) arr = &root["roles"];
-  if (!arr) { if (err) *err = "No \"roles\" list found."; return false; }
-  std::vector<RoleDef> out;
-  for (const auto& r : *arr) {
-    if (!r.is_object() || !r.contains("code") || !r["code"].is_string()) continue;
-    RoleDef d;
-    d.code = r["code"].get<std::string>();
-    d.label = (r.contains("label") && r["label"].is_string()) ? r["label"].get<std::string>() : d.code;
-    d.roleClass = (r.contains("class") && r["class"].is_string()) ? r["class"].get<std::string>() : "";
-    if (r.contains("count") && r["count"].is_number_integer()) d.count = std::max(0, r["count"].get<int>());
-    d.mandatory = r.contains("mandatory") && r["mandatory"].is_boolean() && r["mandatory"].get<bool>();
-    out.push_back(d);
-  }
-  roles_ = out;
-  return true;
+RoleSet RoleSet::defaults() {
+  RoleSet s;
+  s.roles_ = {
+    {"boonheal__quick", "Quick Heal", "heal", "quickheal"},
+    {"boonheal__alac", "Alac Heal", "heal", "alacheal"},
+    {"boondps__quick", "Quick DPS", "boondps", "quickdps"},
+    {"boondps__alac", "Alac DPS", "boondps", "alacdps"},
+    {"dps", "DPS", "dps", "crossed_swords"},
+    {"vg_condi_dps", "VG Condi DPS", "specialty", "fire"},
+    {"g1", "G1", "specialty", "green_circle"},
+    {"kite_g2", "Kite G2", "specialty", "1hc1dhuum"},
+    {"pusher", "Pusher", "specialty", "rightwards_pushing_hand"},
+    {"qtp_pylon_kiter", "QTP Pylon Kiter", "specialty", "1ka1qadim"},
+    {"hk", "HK", "specialty", "hand_splayed"},
+    {"kite", "Q1 Kite", "specialty", "1mg1qadim"},
+    {"lamp", "Lamp", "specialty", "diya_lamp"},
+    {"mat_tank", "Mat Tank", "specialty", "dragon"},
+    {"ranged_dps", "Ranged DPS", "specialty", "bow_and_arrow"},
+    {"decima_kite", "Decima Kite", "specialty", ""},
+  };
+  return s;
 }
 
 const RoleDef* RoleSet::find(const std::string& code) const {
@@ -68,17 +68,20 @@ bool Assignments::loadFromJson(const std::string& text, std::string* err) {
   return true;
 }
 
-std::vector<BoardRow> buildBoard(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present) {
+std::vector<BoardRow> buildBoard(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present,
+                                 const std::map<std::string, int>& need) {
   std::vector<BoardRow> rows;
   for (const auto& r : roles.roles()) {
     BoardRow row; row.role = r;
     for (const auto& m : present) {
-      if (a.get(m.account.empty() ? m.character : m.account) == r.code)
-        row.holders.push_back(m.account.empty() ? m.character : m.account);
+      const std::string& who = m.account.empty() ? m.character : m.account;
+      if (a.get(who) == r.code) row.holders.push_back(who);
     }
+    auto it = need.find(r.code);
+    row.need = it == need.end() ? 0 : std::max(0, it->second);
     int have = (int)row.holders.size();
-    row.open = std::max(0, r.count - have);
-    row.over = std::max(0, have - r.count);
+    row.open = std::max(0, row.need - have);
+    row.over = row.need > 0 ? std::max(0, have - row.need) : 0;
     rows.push_back(row);
   }
   return rows;

@@ -22,7 +22,6 @@ jobs:
         run: |
           mkdir dist
           cp build/Release/squad_watch.dll dist/
-          cp samples/roles.json dist/roles.sample.json
           cp README.md dist/
       - uses: actions/upload-artifact@v4
         with:

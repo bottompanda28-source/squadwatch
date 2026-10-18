@@ -30,6 +30,10 @@ bool looksLikeUuid(const std::string& s);
 std::vector<Member> parsePaste(const std::string& text);
 std::string formatList(const std::vector<Member>& members, const CopyOptions& opt);
 
+struct Snapshot { std::vector<Member> members; std::string label; };
+struct Change { enum Kind { Joined, Left, Moved, CharacterChanged } kind; Member now, before; };
+std::vector<Change> diffSnapshot(const Snapshot& before, const std::vector<Member>& now);
+
 class Roster {
  public:
   void join(const std::string& account, const std::string& character, int subgroup);  // ArcDPS add/update
@@ -38,6 +42,14 @@ class Roster {
   void mergePaste(const std::vector<Member>& pasted);  // adds/updates, never removes
   void replaceWithPaste(const std::vector<Member>& pasted);
   void clear() { members_.clear(); }
+  void remove(const std::string& account);             // by account (or character if no account)
+  void setSubgroup(const std::string& account, int subgroup);
+  // "Update from clipboard": the pasted list is the truth. Members whose account is absent have left;
+  // character changes are allowed. Subgroups already assigned are kept. Returns what changed
+  // (empty and no changes reported when the roster was empty before, i.e. first import).
+  std::vector<Change> applyUpdate(const std::vector<Member>& pasted);
+  std::string toJson() const;
+  bool loadFromJson(const std::string& text);
   const std::vector<Member>& members() const { return members_; }
   std::vector<Member> sorted() const;  // by subgroup then account, unknown subgroup last
   size_t size() const { return members_.size(); }
@@ -46,8 +58,5 @@ class Roster {
   std::vector<Member> members_;
 };
 
-struct Snapshot { std::vector<Member> members; std::string label; };
-struct Change { enum Kind { Joined, Left, Moved, CharacterChanged } kind; Member now, before; };
-std::vector<Change> diffSnapshot(const Snapshot& before, const std::vector<Member>& now);
 
 }

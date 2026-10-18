@@ -114,21 +114,45 @@ static void testWatchlist() {
 }
 
 static void testRoles() {
-  RoleSet rs; std::string err;
-  CHECK(rs.loadFromJson(R"({"roles":[{"code":"boonheal__quick","label":"Quick Heal","class":"heal","count":1,"mandatory":true},{"code":"dps","label":"DPS","class":"dps","count":2},{"code":"bad"},5]})", &err));
-  CHECK(rs.roles().size() == 3); CHECK_EQ(rs.classOf("boonheal__quick"), "heal"); CHECK_EQ(rs.labelOf("dps"), "DPS");
-  CHECK(!rs.loadFromJson("[1,2", &err));
+  RoleSet rs = RoleSet::defaults();
+  CHECK(rs.roles().size() == 16);
+  CHECK_EQ(rs.classOf("boonheal__quick"), "heal"); CHECK_EQ(rs.labelOf("kite"), "Q1 Kite"); CHECK_EQ(rs.labelOf("decima_kite"), "Decima Kite");
+  CHECK_EQ(rs.classOf("dps"), "dps"); CHECK_EQ(rs.find("dps")->icon, "crossed_swords"); CHECK(rs.find("nope") == nullptr);
   Assignments a; a.set(":Foo.1111", "dps"); a.set("bar.2222", "dps"); a.set("baz.3333", "dps"); a.set("Foo.1111", "boonheal__quick"); a.set("qux.4444", "dps"); a.set("qux.4444", "");
   CHECK_EQ(a.get("FOO.1111"), "boonheal__quick");
   std::vector<Member> present(2); present[0].account = "Foo.1111"; present[1].account = "Bar.2222";
-  auto board = buildBoard(rs, a, present);
-  CHECK(board.size() == 3 && board[0].open == 0 && board[0].holders.size() == 1 && board[1].open == 1 && board[1].holders.size() == 1);
+  std::map<std::string, int> need{{"boonheal__quick", 1}, {"dps", 3}};
+  auto board = buildBoard(rs, a, present, need);
+  CHECK(board.size() == 16 && board[0].open == 0 && board[0].holders.size() == 1);
+  int dpsRow = -1; for (size_t i = 0; i < board.size(); ++i) if (board[i].role.code == "dps") dpsRow = (int)i;
+  CHECK(dpsRow >= 0 && board[dpsRow].holders.size() == 1 && board[dpsRow].open == 2);
+  CHECK(board[1].need == 0 && board[1].open == 0);            // no target -> never "open"
   Assignments b; CHECK(b.loadFromJson(a.toJson())); CHECK_EQ(b.get("bar.2222"), "dps"); CHECK(b.raw().size() == a.raw().size());
   a.prune(present); CHECK(a.raw().size() == 2);
 }
 
+static void testUpdate() {
+  Roster r;
+  auto first = r.applyUpdate(parsePaste("A.1111, a\nB.2222, b\nC.3333, c"));
+  CHECK(first.empty() && r.size() == 3);                      // first import reports no changes
+  r.setSubgroup("B.2222", 1); r.setSubgroup("c.3333", 0);
+  auto ch = r.applyUpdate(parsePaste(":A.1111, a-renamed\n:B.2222, b\nD.4444, d\nA.1111, dupe"));
+  int joined = 0, left = 0, charc = 0;
+  for (auto& c : ch) { joined += c.kind == Change::Joined; left += c.kind == Change::Left; charc += c.kind == Change::CharacterChanged; }
+  CHECK(joined == 1 && left == 1 && charc == 1);
+  CHECK(r.size() == 3);                                       // C left, D joined, duplicate ignored
+  int sub = -9; for (auto& m : r.members()) if (m.account == "B.2222") sub = m.subgroup;
+  CHECK(sub == 1);                                            // manual subgroup survives an update
+  bool aRenamed = false; for (auto& m : r.members()) if (m.account == "A.1111" && m.character == "a-renamed") aRenamed = true;
+  CHECK(aRenamed);
+  r.remove("d.4444"); CHECK(r.size() == 2);
+  Roster r2; CHECK(r2.loadFromJson(r.toJson())); CHECK(r2.size() == 2);
+  bool kept = false; for (auto& m : r2.members()) if (m.account == "B.2222" && m.subgroup == 1) kept = true;
+  CHECK(kept); CHECK(!r2.loadFromJson("{oops"));
+}
+
 int main() {
-  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles();
+  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate();
   std::printf("%d checks, %d failed\n", g_n, g_fail);
   return g_fail ? 1 : 0;
 }

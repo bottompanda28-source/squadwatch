@@ -1,5 +1,6 @@
 #include "roster.hpp"
 #include "text.hpp"
+#include <nlohmann/json.hpp>
 #include <algorithm>
 
 namespace sw {
@@ -130,6 +131,59 @@ void Roster::mergePaste(const std::vector<Member>& pasted) {
 void Roster::replaceWithPaste(const std::vector<Member>& pasted) {
   members_.clear();
   mergePaste(pasted);
+}
+
+void Roster::remove(const std::string& account) {
+  int i = indexOf(normKey(stripAccountPrefix(account)));
+  if (i >= 0) members_.erase(members_.begin() + i);
+}
+
+void Roster::setSubgroup(const std::string& account, int subgroup) {
+  int i = indexOf(normKey(stripAccountPrefix(account)));
+  if (i >= 0) members_[i].subgroup = subgroup < 0 ? -1 : subgroup;
+}
+
+std::vector<Change> Roster::applyUpdate(const std::vector<Member>& pasted) {
+  Snapshot before; before.members = members_;
+  bool wasEmpty = members_.empty();
+  std::vector<Member> next;
+  for (const auto& p : pasted) {
+    Member m = p; m.account = stripAccountPrefix(m.account); m.live = false;
+    bool dup = false;
+    for (auto& n : next) if (n.key() == m.key()) { dup = true; break; }
+    if (dup) continue;
+    int i = indexOf(m.key());
+    if (i >= 0 && m.subgroup < 0) m.subgroup = members_[i].subgroup;     // keep manual subgroup
+    if (i >= 0 && m.character.empty()) m.character = members_[i].character;
+    next.push_back(m);
+  }
+  members_ = next;
+  if (wasEmpty) return {};
+  return diffSnapshot(before, members_);
+}
+
+std::string Roster::toJson() const {
+  nlohmann::json j = nlohmann::json::array();
+  for (const auto& m : members_) j.push_back({{"account", m.account}, {"character", m.character}, {"subgroup", m.subgroup}});
+  return nlohmann::json{{"version", 1}, {"members", j}}.dump(2);
+}
+
+bool Roster::loadFromJson(const std::string& text) {
+  try {
+    auto j = nlohmann::json::parse(text);
+    if (!j.is_object() || !j.contains("members") || !j["members"].is_array()) return false;
+    std::vector<Member> v;
+    for (const auto& e : j["members"]) {
+      if (!e.is_object()) continue;
+      Member m;
+      if (e.contains("account") && e["account"].is_string()) m.account = e["account"].get<std::string>();
+      if (e.contains("character") && e["character"].is_string()) m.character = e["character"].get<std::string>();
+      if (e.contains("subgroup") && e["subgroup"].is_number_integer()) m.subgroup = e["subgroup"].get<int>();
+      if (!m.key().empty()) v.push_back(m);
+    }
+    members_ = v;
+    return true;
+  } catch (...) { return false; }
 }
 
 std::vector<Member> Roster::sorted() const {
