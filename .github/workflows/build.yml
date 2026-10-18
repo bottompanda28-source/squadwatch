@@ -1,0 +1,42 @@
+name: build
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (64-bit)
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir dist
+          cp build/Release/squad_watch.dll dist/
+          cp samples/roles.json dist/roles.sample.json
+          cp README.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: squad_watch
+          path: dist/
+      - name: Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/squad_watch.dll
+
+  linux-core:
+    # Fast portable check of the logic without the Windows glue.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure

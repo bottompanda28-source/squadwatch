@@ -1,0 +1,12 @@
+{
+  "roles": [
+    { "code": "boonheal__quick", "label": "Quick Heal", "class": "heal", "count": 1, "mandatory": true },
+    { "code": "boonheal__alac", "label": "Alac Heal", "class": "heal", "count": 1, "mandatory": true },
+    { "code": "boondps__quick", "label": "Quick DPS", "class": "boondps", "count": 1, "mandatory": false },
+    { "code": "boondps__alac", "label": "Alac DPS", "class": "boondps", "count": 1, "mandatory": false },
+    { "code": "dps", "label": "DPS", "class": "dps", "count": 4, "mandatory": false },
+    { "code": "g1", "label": "G1", "class": "specialty", "count": 1, "mandatory": false },
+    { "code": "kite_g2", "label": "Kite / G2", "class": "specialty", "count": 1, "mandatory": false },
+    { "code": "pusher", "label": "Pusher", "class": "specialty", "count": 1, "mandatory": false }
+  ]
+}
