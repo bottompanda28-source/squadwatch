@@ -6,6 +6,7 @@
 //
 //   a  account (the composer may only know a react name without ".1234")   c  character / display name (optional)
 //   r  role code (same ids as RoleSet)   s  subgroup, 1-based (absent = none)   t  1 = tank
+//   p  preferred role code (optional; a side that has no "prefers" simply ignores it)
 #include "roles.hpp"
 #include "roster.hpp"
 #include <string>
@@ -14,7 +15,7 @@
 namespace sw {
 
 struct ExchangeMember {
-  std::string account, character, role;
+  std::string account, character, role, prefer;
   int subgroup = 0;   // 1-based, 0 = none
   bool tank = false;
 };
@@ -30,6 +31,7 @@ struct ExchangeReport {
   int added = 0;                       // entries added because the squad list was empty
   int seated = 0;                      // members that received a subgroup
   int roleSet = 0;                     // members that received a role
+  int preferSet = 0;                   // members that received a preferred role
   int tanks = 0;                       // members marked as tank
   std::vector<std::string> unknownRoles;   // role codes this addon does not have (the role was skipped)
   std::vector<std::string> notInSquad;     // entries that matched nobody (squad list not empty, so not added)

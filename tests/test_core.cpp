@@ -274,6 +274,28 @@ static void testExchange() {
   bool sawBravo = false; for (auto& m : r3.members()) if (m.character == "Bravo") { sawBravo = true; CHECK(m.account.empty() && m.subgroup == 1); }
   CHECK(sawBravo);
 
+  // "Prefers": optional field, carried both ways, ignored when absent, persisted, pruned with the player
+  {
+    Roster rp; Assignments ap;
+    rp.mergePaste(parsePaste("P.1111\nQ.2222"));
+    ap.setPrefer("P.1111", "kite"); ap.set("P.1111", "dps");
+    std::string pb = buildExchange(rs, ap, rp.members());
+    CHECK(pb.find("\"p\":\"kite\"") != std::string::npos);
+    CHECK(buildExchange(rs, Assignments(), rp.members()).find("\"p\"") == std::string::npos);
+    std::vector<ExchangeMember> pin; CHECK(parseExchange(pb, &pin, &err) && pin[0].prefer == "kite" && pin[1].prefer.empty());
+    Roster rq; Assignments aq; rq.mergePaste(parsePaste("P.1111\nQ.2222"));
+    aq.setPrefer("Q.2222", "hk");                                       // not in the paste: untouched
+    rep = applyExchange(rq, aq, rs, pin);
+    CHECK(aq.getPrefer("P.1111") == "kite" && aq.getPrefer("Q.2222") == "hk" && rep.preferSet == 1);
+    // old copies without "p" and unknown preferred roles are harmless
+    CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"P.1111\",\"p\":\"nope\"}]}", &pin, &err));
+    rep = applyExchange(rq, aq, rs, pin);
+    CHECK(aq.getPrefer("P.1111") == "kite" && rep.unknownRoles.size() == 1);
+    Assignments ar; CHECK(ar.loadFromJson(aq.toJson()) && ar.getPrefer("P.1111") == "kite");
+    ar.clear(); CHECK(ar.getPrefer("P.1111") == "kite");                 // Clear all roles keeps prefers
+    ar.prune(std::vector<Member>(rq.members().begin() + 1, rq.members().end())); CHECK(ar.getPrefer("P.1111").empty());
+  }
+
   // a shared character name never overrides two different known accounts
   Roster r5; Assignments a5;
   r5.mergePaste(parsePaste("Yan.1111, Shared Char"));

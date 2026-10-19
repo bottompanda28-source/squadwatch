@@ -47,6 +47,15 @@ std::string Assignments::get(const std::string& account) const {
   auto it = map_.find(normKey(stripAccountPrefix(account)));
   return it == map_.end() ? "" : it->second;
 }
+void Assignments::setPrefer(const std::string& account, const std::string& code) {
+  std::string k = normKey(stripAccountPrefix(account));
+  if (k.empty()) return;
+  if (code.empty()) prefers_.erase(k); else prefers_[k] = code;
+}
+std::string Assignments::getPrefer(const std::string& account) const {
+  auto it = prefers_.find(normKey(stripAccountPrefix(account)));
+  return it == prefers_.end() ? "" : it->second;
+}
 bool Assignments::isTank(const std::string& account) const { return tanks_.count(normKey(stripAccountPrefix(account))) > 0; }
 void Assignments::setTank(const std::string& account, bool on) {
   std::string k = normKey(stripAccountPrefix(account));
@@ -65,11 +74,17 @@ void Assignments::prune(const std::vector<Member>& present) {
     for (const auto& m : present) if (m.key() == *it) { here = true; break; }
     it = here ? std::next(it) : tanks_.erase(it);
   }
+  for (auto it = prefers_.begin(); it != prefers_.end();) {
+    bool here = false;
+    for (const auto& m : present) if (m.key() == it->first) { here = true; break; }
+    it = here ? std::next(it) : prefers_.erase(it);
+  }
 }
 std::string Assignments::toJson() const {
-  json j; j["version"] = 1; j["assignments"] = json::object(); j["tanks"] = json::array();
+  json j; j["version"] = 1; j["assignments"] = json::object(); j["tanks"] = json::array(); j["prefers"] = json::object();
   for (const auto& kv : map_) j["assignments"][kv.first] = kv.second;
   for (const auto& t : tanks_) j["tanks"].push_back(t);
+  for (const auto& kv : prefers_) j["prefers"][kv.first] = kv.second;
   return j.dump(2);
 }
 bool Assignments::loadFromJson(const std::string& text, std::string* err) {
@@ -77,11 +92,14 @@ bool Assignments::loadFromJson(const std::string& text, std::string* err) {
   try { root = json::parse(text); }
   catch (const std::exception& ex) { if (err) *err = std::string("Not valid JSON: ") + ex.what(); return false; }
   if (!root.is_object() || !root.contains("assignments") || !root["assignments"].is_object()) { if (err) *err = "No \"assignments\" object."; return false; }
-  map_.clear(); tanks_.clear();
+  map_.clear(); tanks_.clear(); prefers_.clear();
   for (auto it = root["assignments"].begin(); it != root["assignments"].end(); ++it)
     if (it.value().is_string()) map_[normKey(it.key())] = it.value().get<std::string>();
   if (root.contains("tanks") && root["tanks"].is_array())
     for (const auto& t : root["tanks"]) if (t.is_string()) tanks_.insert(normKey(t.get<std::string>()));
+  if (root.contains("prefers") && root["prefers"].is_object())
+    for (auto it = root["prefers"].begin(); it != root["prefers"].end(); ++it)
+      if (it.value().is_string()) prefers_[normKey(it.key())] = it.value().get<std::string>();
   return true;
 }
 

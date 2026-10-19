@@ -31,7 +31,9 @@ class Assignments {
  public:
   void set(const std::string& account, const std::string& code);  // empty code clears
   std::string get(const std::string& account) const;
-  void clear() { map_.clear(); tanks_.clear(); }
+  void clear() { map_.clear(); tanks_.clear(); }   // roles + tank marks only: "prefers" is a standing wish and stays
+  void setPrefer(const std::string& account, const std::string& code);  // role the player would like to play; empty clears
+  std::string getPrefer(const std::string& account) const;
   bool isTank(const std::string& account) const;
   void setTank(const std::string& account, bool on);
   void prune(const std::vector<Member>& present);  // optional: drop people no longer in squad
@@ -41,6 +43,7 @@ class Assignments {
  private:
   std::map<std::string, std::string> map_;  // normKey(account) -> role code
   std::set<std::string> tanks_;              // normKey(account) of players marked as tank
+  std::map<std::string, std::string> prefers_;  // normKey(account) -> preferred role code (a marker, nothing more)
 };
 
 struct BoardRow {

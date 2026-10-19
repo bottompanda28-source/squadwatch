@@ -17,6 +17,8 @@ std::string buildExchange(const RoleSet& roles, const Assignments& a, const std:
     if (!m.account.empty() && !m.character.empty()) e["c"] = m.character;
     std::string role = a.get(who);
     if (!role.empty()) e["r"] = role;
+    std::string pref = a.getPrefer(who);
+    if (!pref.empty()) e["p"] = pref;
     if (m.subgroup >= 0) e["s"] = m.subgroup + 1;
     if (a.isTank(who)) e["t"] = 1;
     arr.push_back(e);
@@ -45,6 +47,7 @@ bool parseExchange(const std::string& text, std::vector<ExchangeMember>* out, st
     m.account = stripAccountPrefix(str(j, "a"));
     m.character = trimJs(str(j, "c"));
     m.role = str(j, "r");
+    m.prefer = str(j, "p");
     if (j.contains("s") && j["s"].is_number_integer()) m.subgroup = j["s"].get<int>();
     if (j.contains("t")) m.tank = (j["t"].is_boolean() && j["t"].get<bool>()) || (j["t"].is_number() && j["t"].get<double>() != 0);
     if (m.account.empty() && m.character.empty()) continue;
@@ -146,6 +149,10 @@ ExchangeReport applyExchange(Roster& roster, Assignments& assign, const RoleSet&
         rep.unknownRoles.push_back(e.role);
       }
     }
+    if (!e.prefer.empty()) {
+      if (roles.find(e.prefer)) { assign.setPrefer(t.who, e.prefer); ++rep.preferSet; }
+      else if (std::find(rep.unknownRoles.begin(), rep.unknownRoles.end(), e.prefer) == rep.unknownRoles.end()) rep.unknownRoles.push_back(e.prefer);
+    }
     if (e.tank && roles.classOf(assign.get(t.who)) == "heal") { assign.setTank(t.who, true); ++rep.tanks; }
   }
   return rep;
@@ -155,6 +162,7 @@ std::string describeExchange(const ExchangeReport& r) {
   std::string s = "Pasted from composer: " + std::to_string(r.matched) + " of " + std::to_string(r.total) + " matched";
   if (r.added) s += " (squad list was empty, " + std::to_string(r.added) + " added)";
   s += "; " + std::to_string(r.seated) + " seated, " + std::to_string(r.roleSet) + " roles";
+  if (r.preferSet) s += ", " + std::to_string(r.preferSet) + " prefers";
   if (!r.unknownRoles.empty()) s += "; role not in this addon: " + joinNames(r.unknownRoles, 4);
   if (!r.notInSquad.empty()) s += "; not in the squad list: " + joinNames(r.notInSquad, 4);
   return s;

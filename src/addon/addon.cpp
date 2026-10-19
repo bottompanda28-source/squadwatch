@@ -275,7 +275,7 @@ void doPasteFromComposer() {
 
 void removeMember(const Member& m) {
   const std::string who = m.account.empty() ? m.character : m.account;
-  gRoster.remove(who); gAssign.set(who, ""); gAssign.setTank(who, false);   // snapshot kept: the next update still reports this player as left
+  gRoster.remove(who); gAssign.set(who, ""); gAssign.setTank(who, false); gAssign.setPrefer(who, "");   // snapshot kept: the next update still reports this player as left
   saveSquad(); saveAssignments();
 }
 void setSubgroup(const Member& m, int sg) {
@@ -421,6 +421,25 @@ void drawMemberRow(const Member& m, int idx) {
     ImGui::EndPopup();
   }
 
+  // preferred role (a marker for the squad leader; it changes nothing else)
+  ImGui::TableNextColumn();
+  {
+    std::string pref = gAssign.getPrefer(who);
+    const RoleDef* pd = gRoles.find(pref);
+    if (pd && drawRoleIcon(pd->icon, 16.f)) ImGui::SameLine();
+    if (ImGui::SmallButton(((pref.empty() ? std::string("-") : gRoles.labelOf(pref)) + "##pref").c_str())) ImGui::OpenPopup("preferpick");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Role this player would like to play (Prefers)");
+    if (ImGui::BeginPopup("preferpick")) {
+      ImGui::TextDisabled("%s: prefers", who.c_str());
+      if (ImGui::Selectable("(none)", pref.empty())) { gAssign.setPrefer(who, ""); saveAssignments(); }
+      for (const auto& r : gRoles.roles()) {
+        if (drawRoleIcon(r.icon, 16.f)) ImGui::SameLine();
+        if (ImGui::Selectable(r.label.c_str(), pref == r.code)) { gAssign.setPrefer(who, r.code); saveAssignments(); }
+      }
+      ImGui::EndPopup();
+    }
+  }
+
   ImGui::TableNextColumn();
   // blocked / flagged / trusted are shown by the name colour (red / yellow / green), so no label here
   if (e && gShowTags) drawTags(*e, cls);
@@ -469,10 +488,11 @@ void drawSquadTab() {
   std::vector<Member> list = gRoster.sorted();
   if (list.empty()) { ImGui::TextDisabled("Squad is empty. Copy the list from Squad Attendance, then press Update from clipboard."); return; }
   pushTableBorderColors();
-  if (ImGui::BeginTable("squad", 5, kTableFlags)) {
+  if (ImGui::BeginTable("squad", 6, kTableFlags)) {
     ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch, 2.f);
     ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, 200.f);
     ImGui::TableSetupColumn("Sub", ImGuiTableColumnFlags_WidthFixed, 55.f);
+    ImGui::TableSetupColumn("Prefers", ImGuiTableColumnFlags_WidthFixed, 130.f);
     ImGui::TableSetupColumn("Watchlist", ImGuiTableColumnFlags_WidthStretch, 2.f);
     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.f);
     ImGui::TableHeadersRow();
