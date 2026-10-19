@@ -213,19 +213,20 @@ static void testExchange() {
   Roster r; Assignments a;
   r.mergePaste(parsePaste("Alpha.1111, Alpha Char\nBravo.2222, Bravo Char\nCharlie.3333\nDelta.4444, Delta Char"));
   r.setSubgroup("Alpha.1111", 1); r.setSubgroup("Bravo.2222", 2);   // Charlie / Delta: no subgroup
-  a.set("Alpha.1111", "boonheal__quick"); a.setTank("Alpha.1111", true); a.set("Bravo.2222", "dps");
+  a.set("Alpha.1111", "boonheal__quick"); a.setTank("Alpha.1111", true); a.set("Bravo.2222", "dps"); a.setPrefer("Bravo.2222", "kite");
 
-  // export: everybody, including people without subgroup / role
+  // export: everybody, including people without subgroup / role; "p" only when set
   std::string blob = buildExchange(rs, a, r.members());
   CHECK(blob.find('\n') == std::string::npos);
-  CHECK(blob.find("\"gw2squad\":1") != std::string::npos);
+  CHECK(blob.find("\"gw2squad\":1") != std::string::npos && blob.find("\"p\":\"kite\"") != std::string::npos);
+  CHECK(buildExchange(rs, Assignments(), r.members()).find("\"p\"") == std::string::npos);
   std::vector<ExchangeMember> back; std::string err;
-  CHECK(parseExchange(blob, &back, &err));
-  CHECK(back.size() == 4);
+  CHECK(parseExchange(blob, &back, &err) && back.size() == 4);
   if (back.size() == 4) {
     CHECK_EQ(back[0].account, "Alpha.1111"); CHECK_EQ(back[0].character, "Alpha Char"); CHECK_EQ(back[0].role, "boonheal__quick");
     CHECK(back[0].subgroup == 2 && back[0].tank);                         // 0-based 1 -> 1-based 2
     CHECK(back[2].subgroup == 0 && back[2].role.empty() && back[2].character.empty());
+    CHECK_EQ(back[1].prefer, "kite");
   }
 
   // text around the blob (fences, chat noise) is tolerated; garbage is refused with a message
@@ -235,82 +236,53 @@ static void testExchange() {
   CHECK(!parseExchange(blob.substr(0, blob.size() / 2) + "}", &back, &err));
   CHECK(!parseExchange("{\"gw2squad\":1,\"members\":[]}", &back, &err));
 
-  // what the composer writes: react names, with or without the number, subgroup numbers 2/3, an unknown role
+  // what the composer writes (accounts already cleaned there; a name without number is kept as a character)
   const char* fromComposer =
     "{\"gw2squad\":1,\"src\":\"composer\",\"members\":["
-    "{\"a\":\"alpha.1111\",\"r\":\"boonheal__alac\",\"s\":3},"        // same account, other case
-    "{\"a\":\"Bravo\",\"r\":\"boondps__quick\",\"s\":2},"             // no number
-    "{\"a\":\"Delta Char\",\"r\":\"dps\",\"s\":2},"                   // character name instead of account
-    "{\"a\":\"Charlie.9999\",\"r\":\"hk\",\"s\":2},"                  // wrong number: a different account
-    "{\"a\":\"Zed.5555\",\"r\":\"made_up_role\",\"s\":3},"            // not in the squad
-    "{\"a\":\"Echo\",\"r\":\"made_up_role\",\"s\":3,\"t\":1},"
-    "{\"a\":\"Charlie.3333\",\"r\":\"made_up_role\"}]}";           // matched, but this addon has no such role
-  std::vector<ExchangeMember> in; CHECK(parseExchange(fromComposer, &in, &err)); CHECK(in.size() == 7);
-  ExchangeReport rep = applyExchange(r, a, rs, in);
-  CHECK(rep.total == 7 && rep.matched == 4 && rep.added == 0);
+    "{\"a\":\"Alpha.1111\",\"r\":\"boonheal__alac\",\"s\":3,\"p\":\"kite\"},"
+    "{\"a\":\"Bravo\",\"r\":\"boondps__quick\",\"s\":2},"             // no number: character fallback
+    "{\"a\":\"neco.9451\",\"c\":\"juno\",\"r\":\"dps\",\"s\":2},"
+    "{\"a\":\"Echo.5555\",\"r\":\"made_up_role\",\"s\":3,\"t\":1},"
+    "{\"a\":\"Golf.7777\",\"r\":\"mat_tank\"},"                        // no subgroup
+    "{\"a\":\"alpha.1111\",\"s\":2}]}";                                // the same player twice
+  std::vector<ExchangeMember> in; CHECK(parseExchange(fromComposer, &in, &err)); CHECK(in.size() == 6);
+  ExchangeReport rep = applyExchange(r, a, rs, in);      // r still holds the OLD squad: nothing has to match
+  CHECK(rep.total == 6 && rep.replaced == 4 && rep.duplicates == 1);
+  CHECK(r.size() == 5);                                  // Charlie / Delta are gone, the paste is the squad
   auto find = [&](const char* acct) { for (auto& m : r.members()) if (m.account == acct) return m; return Member(); };
   CHECK(find("Alpha.1111").subgroup == 2 && a.get("Alpha.1111") == "boonheal__alac");
-  CHECK(a.isTank("Alpha.1111"));                                          // kept: still a healer and the paste did not clear it
-  CHECK(find("Bravo.2222").subgroup == 1 && a.get("Bravo.2222") == "boondps__quick");
-  CHECK(find("Delta.4444").subgroup == 1 && a.get("Delta.4444") == "dps"); // matched through the character name
-  CHECK(find("Charlie.3333").subgroup == -1 && a.get("Charlie.3333").empty());
-  CHECK(rep.notInSquad.size() == 3);                                       // Charlie.9999, Zed.5555, Echo
+  CHECK(find("Alpha.1111").character == "Alpha Char");   // kept: the paste had none
+  CHECK(!a.isTank("Alpha.1111"));                        // old tank mark dropped with the old list
+  CHECK(a.getPrefer("Alpha.1111") == "kite");
+  CHECK(find("neco.9451").character == "juno" && find("neco.9451").subgroup == 1 && a.get("neco.9451") == "dps");
+  CHECK(find("Golf.7777").subgroup == -1 && a.get("Golf.7777") == "mat_tank");
+  CHECK(find("Echo.5555").subgroup == 2 && a.get("Echo.5555").empty() && !a.isTank("Echo.5555"));
   CHECK(rep.unknownRoles.size() == 1 && rep.unknownRoles[0] == "made_up_role");
+  bool sawBravo = false;
+  for (auto& m : r.members()) if (m.character == "Bravo") { sawBravo = true; CHECK(m.account.empty() && m.subgroup == 1 && a.get("Bravo") == "boondps__quick"); }
+  CHECK(sawBravo);
+  CHECK(a.getPrefer("Bravo.2222").empty());              // left the squad: prefers dropped
   CHECK(!describeExchange(rep).empty());
 
-  // tank flag: applied to healers only; a non-heal role drops an old tank mark
-  Roster r2; Assignments a2;
-  r2.mergePaste(parsePaste("P.1111\nQ.2222"));
-  std::vector<ExchangeMember> t2;
+  // an empty (just cleared) list takes a paste just the same
+  Roster r3; Assignments a3;
+  rep = applyExchange(r3, a3, rs, in);
+  CHECK(rep.replaced == 0 && r3.size() == 5 && a3.get("Alpha.1111") == "boonheal__alac");
+
+  // tank flag: healers only
+  Roster r2; Assignments a2; std::vector<ExchangeMember> t2;
   CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"P.1111\",\"r\":\"boonheal__quick\",\"s\":2,\"t\":1},{\"a\":\"Q.2222\",\"r\":\"dps\",\"s\":3,\"t\":1}]}", &t2, &err));
   rep = applyExchange(r2, a2, rs, t2);
   CHECK(a2.isTank("P.1111") && !a2.isTank("Q.2222") && rep.tanks == 1);
 
-  // empty squad list: the pasted squad becomes the list
-  Roster r3; Assignments a3;
-  rep = applyExchange(r3, a3, rs, in);
-  CHECK(r3.size() == 7 && rep.added == 7 && rep.matched == 7 && rep.notInSquad.empty());
-  CHECK(a3.get("alpha.1111") == "boonheal__alac");
-  bool sawBravo = false; for (auto& m : r3.members()) if (m.character == "Bravo") { sawBravo = true; CHECK(m.account.empty() && m.subgroup == 1); }
-  CHECK(sawBravo);
-
-  // "Prefers": optional field, carried both ways, ignored when absent, persisted, pruned with the player
-  {
-    Roster rp; Assignments ap;
-    rp.mergePaste(parsePaste("P.1111\nQ.2222"));
-    ap.setPrefer("P.1111", "kite"); ap.set("P.1111", "dps");
-    std::string pb = buildExchange(rs, ap, rp.members());
-    CHECK(pb.find("\"p\":\"kite\"") != std::string::npos);
-    CHECK(buildExchange(rs, Assignments(), rp.members()).find("\"p\"") == std::string::npos);
-    std::vector<ExchangeMember> pin; CHECK(parseExchange(pb, &pin, &err) && pin[0].prefer == "kite" && pin[1].prefer.empty());
-    Roster rq; Assignments aq; rq.mergePaste(parsePaste("P.1111\nQ.2222"));
-    aq.setPrefer("Q.2222", "hk");                                       // not in the paste: untouched
-    rep = applyExchange(rq, aq, rs, pin);
-    CHECK(aq.getPrefer("P.1111") == "kite" && aq.getPrefer("Q.2222") == "hk" && rep.preferSet == 1);
-    // old copies without "p" and unknown preferred roles are harmless
-    CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"P.1111\",\"p\":\"nope\"}]}", &pin, &err));
-    rep = applyExchange(rq, aq, rs, pin);
-    CHECK(aq.getPrefer("P.1111") == "kite" && rep.unknownRoles.size() == 1);
-    Assignments ar; CHECK(ar.loadFromJson(aq.toJson()) && ar.getPrefer("P.1111") == "kite");
-    ar.clear(); CHECK(ar.getPrefer("P.1111") == "kite");                 // Clear all roles keeps prefers
-    ar.prune(std::vector<Member>(rq.members().begin() + 1, rq.members().end())); CHECK(ar.getPrefer("P.1111").empty());
-  }
-
-  // a shared character name never overrides two different known accounts
-  Roster r5; Assignments a5;
-  r5.mergePaste(parsePaste("Yan.1111, Shared Char"));
-  std::vector<ExchangeMember> t5;
-  CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"Zed.9999\",\"c\":\"Shared Char\",\"r\":\"dps\",\"s\":2}]}", &t5, &err));
-  rep = applyExchange(r5, a5, rs, t5);
-  CHECK(rep.matched == 0 && rep.notInSquad.size() == 1);
-
-  // two entries never claim the same member
-  Roster r4; Assignments a4;
-  r4.mergePaste(parsePaste("Same.1111, X"));
+  // prefers: kept for a player who stays when the paste has none (a composer view without prefers), unknown codes reported
+  Roster r4; Assignments a4; r4.mergePaste(parsePaste("P.1111\nQ.2222")); a4.setPrefer("P.1111", "hk"); a4.setPrefer("Q.2222", "hk");
   std::vector<ExchangeMember> t4;
-  CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"Same\",\"r\":\"dps\",\"s\":2},{\"a\":\"Same.1111\",\"r\":\"hk\",\"s\":3}]}", &t4, &err));
+  CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"P.1111\",\"s\":2},{\"a\":\"Z.3333\",\"p\":\"nope\"}]}", &t4, &err));
   rep = applyExchange(r4, a4, rs, t4);
-  CHECK(rep.matched == 1 && a4.get("Same.1111") == "hk" && r4.members()[0].subgroup == 2);   // exact account text wins
+  CHECK(a4.getPrefer("P.1111") == "hk" && a4.getPrefer("Q.2222").empty() && rep.unknownRoles.size() == 1);
+  Assignments ar; CHECK(ar.loadFromJson(a4.toJson()) && ar.getPrefer("P.1111") == "hk");
+  ar.clear(); CHECK(ar.getPrefer("P.1111") == "hk");     // Clear all roles keeps prefers
 }
 
 int main() {

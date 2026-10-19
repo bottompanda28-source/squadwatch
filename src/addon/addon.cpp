@@ -267,7 +267,13 @@ void doPasteFromComposer() {
   std::vector<ExchangeMember> in; std::string err;
   if (!parseExchange(clipboardRead(), &in, &err)) { gStatus = err; alert(gStatus); return; }
   gUndo.record(captureState(), "Paste from composer");
+  bool hadSquad = gRoster.size() > 0;
+  std::vector<SnapMember> before = gSnapValid ? gSnap : snapshotOfRoster();
   ExchangeReport rep = applyExchange(gRoster, gAssign, gRoles, in);
+  if (hadSquad) {                       // like an update: report who joined / left (and which roles left)
+    ChangeEntry e = diffForHistory(before, gRoster.members(), nowString());
+    if (!e.joined.empty() || !e.left.empty()) { gLog.push(e); saveHistory(); }
+  }
   saveSquad(); saveAssignments(); refreshSnapshot();
   gStatus = describeExchange(rep);
   alert(gStatus.size() > 120 ? gStatus.substr(0, 117) + "..." : gStatus);
@@ -454,7 +460,7 @@ void drawSquadTab() {
   if (ImGui::Button("Copy for composer")) doCopyForComposer();
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies the squad with subgroups and roles so the Raid Squad Composer can read it\n(Squad editor / Role tracking: 'Paste from Squad Watch').");
   ImGui::SameLine(); if (ImGui::Button("Paste from composer")) doPasteFromComposer();
-  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Applies the subgroups and roles copied from the composer ('Copy for Squad Watch') to the people already in this list.\nPeople who are not in the pasted text stay as they are. If the list is empty, the pasted squad becomes the list.\nUndo steps this back.");
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Replaces the squad list with the squad copied from the composer ('Copy for Squad Watch'),\nincluding its subgroups and roles. Undo steps this back.");
   if (ImGui::Button("Copy squad")) { if (gRoster.size()) { doCopy(); } else gStatus = "Nothing to copy: squad list is empty"; }
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies the list to the clipboard using the format set in Nexus options");
   ImGui::SameLine(); ImGui::TextDisabled("Copy by role:");
@@ -488,11 +494,25 @@ void drawSquadTab() {
   std::vector<Member> list = gRoster.sorted();
   if (list.empty()) { ImGui::TextDisabled("Squad is empty. Copy the list from Squad Attendance, then press Update from clipboard."); return; }
   pushTableBorderColors();
+  // Column widths: Role (and Prefers) are as wide as the widest role needs and no wider; Player and Watchlist share the rest,
+  // Player winning. (ImGui 1.80 cannot cap a stretch column, so the role width is measured once and used as a fixed width.)
+  static float sRoleW = 0.f, sPrefW = 0.f;
+  if (sRoleW <= 0.f) {
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float iconW = 18.f + st.ItemSpacing.x, btnPad = st.FramePadding.x * 2.f;
+    const float tankW = st.ItemSpacing.x + ImGui::CalcTextSize("Tank").x + btnPad;
+    for (const auto& r : gRoles.roles()) {
+      float label = ImGui::CalcTextSize(r.label.c_str()).x + btnPad + (r.icon.empty() ? 0.f : iconW);
+      sRoleW = std::max(sRoleW, label + (r.roleClass == "heal" ? tankW : 0.f));
+      sPrefW = std::max(sPrefW, label);
+    }
+    sRoleW += st.CellPadding.x * 2.f + 4.f; sPrefW += st.CellPadding.x * 2.f + 4.f;
+  }
   if (ImGui::BeginTable("squad", 6, kTableFlags)) {
-    ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch, 2.f);
-    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, 200.f);
+    ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch, 3.f);
+    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, sRoleW);
     ImGui::TableSetupColumn("Sub", ImGuiTableColumnFlags_WidthFixed, 55.f);
-    ImGui::TableSetupColumn("Prefers", ImGuiTableColumnFlags_WidthFixed, 130.f);
+    ImGui::TableSetupColumn("Prefers", ImGuiTableColumnFlags_WidthFixed, sPrefW);
     ImGui::TableSetupColumn("Watchlist", ImGuiTableColumnFlags_WidthStretch, 2.f);
     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.f);
     ImGui::TableHeadersRow();

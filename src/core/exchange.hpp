@@ -27,19 +27,20 @@ bool parseExchange(const std::string& text, std::vector<ExchangeMember>* out, st
 
 struct ExchangeReport {
   int total = 0;                       // entries in the pasted text
-  int matched = 0;                     // entries that found a squad member
-  int added = 0;                       // entries added because the squad list was empty
+  int replaced = 0;                    // members the squad list held before it was replaced
+  int duplicates = 0;                  // entries skipped because the same player was listed twice
   int seated = 0;                      // members that received a subgroup
   int roleSet = 0;                     // members that received a role
   int preferSet = 0;                   // members that received a preferred role
   int tanks = 0;                       // members marked as tank
   std::vector<std::string> unknownRoles;   // role codes this addon does not have (the role was skipped)
-  std::vector<std::string> notInSquad;     // entries that matched nobody (squad list not empty, so not added)
 };
 
-// Applies the pasted entries to the squad. Matching is by account (case-insensitive, number optional) and falls back
-// to the character name. Members that are not in the pasted text are left untouched. When the squad list is empty
-// everybody in the pasted text is added (the clipboard list from Squad Attendance can still replace it later).
+// The pasted text REPLACES the squad list: everybody in it becomes a member (account when the name is an account,
+// otherwise the name is kept as the character), with the pasted subgroup, role, tank mark and preferred role.
+// Nothing is matched against the old list, so an empty or stale list does not matter. Roles and tank marks that were
+// set before are dropped with the old list; a preferred role is kept for a player who is still in the squad and
+// whose paste carries none (not every composer view has "prefers"), and a character name is kept when the paste has none.
 ExchangeReport applyExchange(Roster& roster, Assignments& assign, const RoleSet& roles, const std::vector<ExchangeMember>& in);
 std::string describeExchange(const ExchangeReport& r);
 
