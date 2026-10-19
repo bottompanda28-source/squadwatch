@@ -1,6 +1,7 @@
 #include "../src/core/history.hpp"
 #include "../src/core/match.hpp"
 #include "../src/core/roles.hpp"
+#include "../src/core/undo.hpp"
 #include "../src/core/roster.hpp"
 #include "../src/core/text.hpp"
 #include "../src/core/watchlist.hpp"
@@ -190,8 +191,24 @@ static void testNewFeatures() {
   std::vector<SnapMember> rt; CHECK(snapshotFromJson(snapshotToJson(snap), &rt)); CHECK(rt.size() == 4 && rt[1].role == "boondps__alac");
 }
 
+static void testUndo() {
+  UndoStack<int> u(2); int cur = 0, out = -1; std::string lab;
+  CHECK(!u.canUndo() && !u.canRedo() && !u.undo(cur, &out));
+  u.record(cur, "a"); cur = 1; u.record(cur, "b"); cur = 2; u.record(cur, "c"); cur = 3;   // depth 2: "a" is dropped
+  CHECK(u.canUndo() && u.undoLabel() == "c");
+  CHECK(u.undo(cur, &out, &lab) && out == 2 && lab == "c"); cur = out;
+  CHECK(u.undo(cur, &out, &lab) && out == 1 && lab == "b"); cur = out;
+  CHECK(!u.undo(cur, &out));                                  // only two steps
+  CHECK(u.canRedo() && u.redoLabel() == "b");
+  CHECK(u.redo(cur, &out, &lab) && out == 2); cur = out;
+  CHECK(u.redo(cur, &out) && out == 3); cur = out;
+  CHECK(!u.canRedo());
+  u.undo(cur, &out); cur = out; u.record(cur, "d"); CHECK(!u.canRedo());   // new action clears redo
+  u.clear(); CHECK(!u.canUndo());
+}
+
 int main() {
-  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures();
+  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo();
   std::printf("%d checks, %d failed\n", g_n, g_fail);
   return g_fail ? 1 : 0;
 }

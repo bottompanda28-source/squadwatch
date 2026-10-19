@@ -21,10 +21,10 @@ RoleSet RoleSet::defaults() {
     {"pusher", "Pusher", "specialty", "rightwards_pushing_hand", "Pusher"},
     {"g1", "G1", "specialty", "green_circle", "G1"},
     {"kite_g2", "Kite G2", "specialty", "1hc1dhuum", "KiteG2"},
-    {"qtp_pylon_kiter", "Q2 Kite", "specialty", "1ka1qadim", "Q2kite"},
     {"kite", "Q1 Kite", "specialty", "1mg1qadim", "Q1Kite"},
     {"lamp", "Lamp", "specialty", "diya_lamp", "Lamp"},
     {"mat_tank", "Mat Tank", "specialty", "dragon", "MatTank"},
+    {"qtp_pylon_kiter", "Q2 Kite", "specialty", "1ka1qadim", "Q2kite"},
     {"ranged_dps", "Ranged DPS", "specialty", "bow_and_arrow", "RangedDPS"},
     {"decima_kite", "Decima Kite", "specialty", "", "DecimaKite"},
   };

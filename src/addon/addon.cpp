@@ -8,6 +8,7 @@
 #include "../core/match.hpp"
 #include "../core/roles.hpp"
 #include "../core/roster.hpp"
+#include "../core/undo.hpp"
 #include "../core/text.hpp"
 #include "../core/watchlist.hpp"
 #include <nlohmann/json.hpp>
@@ -56,6 +57,9 @@ bool gVisible = false;
 bool gShowTags = true, gShowNotes = true;
 int gMaxTags = 3;
 std::string gStatus;
+int gCopySub = -2;                     // subgroup for "Copy by role": -2 all subs, -1 no subgroup, >=0 that subgroup
+struct AppState { std::string squad, assign, snapshot, log; bool snapValid = false; };
+UndoStack<AppState> gUndo(2);          // undo/redo for update / clear actions
 std::string gWatchStatus;
 fs::path gDir;
 
@@ -184,6 +188,26 @@ std::vector<SnapMember> snapshotOfRoster() {
 // The baseline for "who left": refreshed whenever a role is assigned, and after every update.
 void refreshSnapshot() { gSnap = snapshotOfRoster(); gSnapValid = true; saveSnapshot(); }
 
+AppState captureState() {
+  AppState st;
+  st.squad = gRoster.toJson(); st.assign = gAssign.toJson(); st.snapshot = snapshotToJson(gSnap); st.log = gLog.toJson(); st.snapValid = gSnapValid;
+  return st;
+}
+void restoreState(const AppState& st) {
+  gRoster.loadFromJson(st.squad); gAssign.loadFromJson(st.assign);
+  std::vector<SnapMember> snap; if (snapshotFromJson(st.snapshot, &snap)) gSnap = snap;
+  gSnapValid = st.snapValid; gLog.loadFromJson(st.log);
+  saveSquad(); saveAssignments(); saveSnapshot(); saveHistory();
+}
+void doUndo() {
+  AppState prev; std::string label;
+  if (gUndo.undo(captureState(), &prev, &label)) { restoreState(prev); gStatus = "Undid: " + label; }
+}
+void doRedo() {
+  AppState next; std::string label;
+  if (gUndo.redo(captureState(), &next, &label)) { restoreState(next); gStatus = "Redid: " + label; }
+}
+
 std::string nowString() {
   std::time_t t = std::time(nullptr);
   char buf[16] = "";
@@ -193,7 +217,9 @@ std::string nowString() {
 
 void copyText(const std::string& text, const std::string& what) {
   if (text.empty()) { gStatus = "Nothing to copy: " + what; return; }
+  size_t chars = toU32(text).size();
   gStatus = clipboardWrite(text) ? "Copied " + what + ": " + text : "Could not open the clipboard";
+  if (chars > 199) gStatus += "  [" + std::to_string(chars) + " characters: over the 199 in-game chat limit, copy one subgroup at a time]";
   alert(gStatus.size() > 120 ? gStatus.substr(0, 117) + "..." : gStatus);
 }
 
@@ -209,6 +235,7 @@ void assignRole(const std::string& who, const std::string& code) {
 void doUpdate() {
   auto list = parsePaste(clipboardRead());
   if (list.empty()) { gStatus = "Clipboard has no recognisable names"; alert(gStatus); return; }
+  gUndo.record(captureState(), "Update from clipboard");
   bool first = gRoster.size() == 0 && !gSnapValid;
   std::vector<SnapMember> before = gSnapValid ? gSnap : snapshotOfRoster();
   gRoster.applyUpdate(list);
@@ -338,24 +365,6 @@ void drawMemberRow(const Member& m, int idx) {
     tip += (tip.empty() ? "" : "\n\n") + std::string("Click to copy \"") + stripAccountSuffix(who) + "\"";
     ImGui::SetTooltip("%s", tip.c_str());
   }
-  ImGui::TableNextColumn();
-  // blocked / flagged / trusted are shown by the name colour (red / yellow / green), so no label here
-  if (e && gShowTags) drawTags(*e, cls);
-
-  // subgroup
-  ImGui::TableNextColumn();
-  std::string sgLabel = m.subgroup >= 0 ? "Sub " + std::to_string(m.subgroup + 1) : std::string("Sub -");
-  if (ImGui::SmallButton((sgLabel + "##sg").c_str())) ImGui::OpenPopup("sgpick");
-  if (ImGui::BeginPopup("sgpick")) {
-    ImGui::TextDisabled("%s: subgroup", who.c_str());
-    for (int g = 0; g < 10; ++g) {
-      if (g % 5) ImGui::SameLine();
-      if (ImGui::Button(std::to_string(g + 1).c_str(), ImVec2(30, 0))) { setSubgroup(m, g); ImGui::CloseCurrentPopup(); }
-    }
-    if (ImGui::Button("None", ImVec2(60, 0))) { setSubgroup(m, -1); ImGui::CloseCurrentPopup(); }
-    ImGui::EndPopup();
-  }
-
   // role (+ tank toggle for healers)
   ImGui::TableNextColumn();
   const RoleDef* rd = gRoles.find(role);
@@ -380,6 +389,24 @@ void drawMemberRow(const Member& m, int idx) {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tank ? "Marked as tank (click to unmark)" : "Mark this healer as the tank");
   }
 
+  // subgroup
+  ImGui::TableNextColumn();
+  std::string sgLabel = m.subgroup >= 0 ? "Sub " + std::to_string(m.subgroup + 1) : std::string("Sub -");
+  if (ImGui::SmallButton((sgLabel + "##sg").c_str())) ImGui::OpenPopup("sgpick");
+  if (ImGui::BeginPopup("sgpick")) {
+    ImGui::TextDisabled("%s: subgroup", who.c_str());
+    for (int g = 0; g < 10; ++g) {
+      if (g % 5) ImGui::SameLine();
+      if (ImGui::Button(std::to_string(g + 1).c_str(), ImVec2(30, 0))) { setSubgroup(m, g); ImGui::CloseCurrentPopup(); }
+    }
+    if (ImGui::Button("None", ImVec2(60, 0))) { setSubgroup(m, -1); ImGui::CloseCurrentPopup(); }
+    ImGui::EndPopup();
+  }
+
+  ImGui::TableNextColumn();
+  // blocked / flagged / trusted are shown by the name colour (red / yellow / green), so no label here
+  if (e && gShowTags) drawTags(*e, cls);
+
   ImGui::TableNextColumn();
   if (ImGui::SmallButton("X##rm")) { removeMember(m); }
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove from squad");
@@ -390,19 +417,41 @@ void drawSquadTab() {
   if (ImGui::Button("Copy squad")) { if (gRoster.size()) { doCopy(); } else gStatus = "Nothing to copy: squad list is empty"; }
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies the list to the clipboard using the format set in Nexus options");
   ImGui::SameLine(); ImGui::TextDisabled("Copy by role:");
+  // The in-game chat holds 199 characters, so copy-by-role can be limited to one subgroup.
+  {
+    std::vector<int> present; bool haveNone = false;
+    for (const auto& m : gRoster.members()) { if (m.subgroup >= 0) { if (std::find(present.begin(), present.end(), m.subgroup) == present.end()) present.push_back(m.subgroup); } else haveNone = true; }
+    std::sort(present.begin(), present.end());
+    bool valid = gCopySub == -2 || (gCopySub == -1 && haveNone) || std::find(present.begin(), present.end(), gCopySub) != present.end();
+    if (!valid) gCopySub = -2;
+    auto subName = [](int sg) { return sg == -2 ? std::string("All subs") : sg == -1 ? std::string("No subgroup") : "Sub " + std::to_string(sg + 1); };
+    ImGui::SameLine(); ImGui::SetNextItemWidth(110);
+    if (ImGui::BeginCombo("##copysub", subName(gCopySub).c_str())) {
+      if (ImGui::Selectable("All subs", gCopySub == -2)) gCopySub = -2;
+      for (int sg : present) if (ImGui::Selectable(subName(sg).c_str(), gCopySub == sg)) gCopySub = sg;
+      if (haveNone && ImGui::Selectable("No subgroup", gCopySub == -1)) gCopySub = -1;
+      ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Which subgroup the copy-by-role buttons use");
+  }
   struct G { const char* label; const char* cls; } groups[] = {{"DPS", "dps"}, {"Healers", "heal"}, {"BoonDPS", "boondps"}, {"Specialty", "specialty"}, {"All roles", ""}};
   for (const auto& g : groups) {
     ImGui::SameLine();
-    if (ImGui::Button(g.label)) copyText(copyByRole(gRoles, gAssign, gRoster.members(), g.cls), std::string(g.label) + " roles");
+    if (ImGui::Button(g.label)) {
+      std::vector<Member> scope;
+      for (const auto& m : gRoster.members()) if (gCopySub == -2 || m.subgroup == gCopySub) scope.push_back(m);
+      std::string what = std::string(g.label) + (gCopySub == -2 ? "" : gCopySub == -1 ? " (no subgroup)" : " (sub " + std::to_string(gCopySub + 1) + ")");
+      copyText(copyByRole(gRoles, gAssign, scope, g.cls), what);
+    }
   }
   std::vector<Member> list = gRoster.sorted();
   if (list.empty()) { ImGui::TextDisabled("Squad is empty. Copy the list from Squad Attendance, then press Update from clipboard."); return; }
   pushTableBorderColors();
   if (ImGui::BeginTable("squad", 5, kTableFlags)) {
     ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch, 2.f);
-    ImGui::TableSetupColumn("Watchlist", ImGuiTableColumnFlags_WidthStretch, 2.f);
-    ImGui::TableSetupColumn("Sub", ImGuiTableColumnFlags_WidthFixed, 55.f);
     ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, 200.f);
+    ImGui::TableSetupColumn("Sub", ImGuiTableColumnFlags_WidthFixed, 55.f);
+    ImGui::TableSetupColumn("Watchlist", ImGuiTableColumnFlags_WidthStretch, 2.f);
     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.f);
     ImGui::TableHeadersRow();
     int lastGroup = -2;
@@ -463,7 +512,7 @@ void drawRolesTab() {
   ImGui::SameLine();
   if (ImGui::Button("Assign unassigned as DPS")) assignUnassignedDps();
   ImGui::SameLine();
-  if (ImGui::Button("Clear all roles")) { gAssign.clear(); saveAssignments(); refreshSnapshot(); }
+  if (ImGui::Button("Clear all roles")) { gUndo.record(captureState(), "Clear all roles"); gAssign.clear(); saveAssignments(); refreshSnapshot(); }
   ImGui::TextDisabled("Need = how many seats you want filled; 0 means no target. Click a role row to copy its players.");
 }
 
@@ -511,7 +560,17 @@ void renderWindow() {
   if (ImGui::Button("Update from clipboard")) doUpdate();
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Replaces the squad with the list on the clipboard (Account.1234, Character per line).\nAccounts missing from it are treated as having left. Subgroups and roles are kept.");
   ImGui::SameLine(); if (ImGui::Button("Reload watchlist")) { loadWatchlist(); gStatus = "Watchlist: " + gWatchStatus; }
-  ImGui::SameLine(); if (ImGui::Button("Clear list")) { gRoster.clear(); gSnap.clear(); gSnapValid = false; saveSquad(); saveSnapshot(); gStatus = "Squad cleared"; }
+  ImGui::SameLine(); if (ImGui::Button("Clear list")) { gUndo.record(captureState(), "Clear list"); gRoster.clear(); gSnap.clear(); gSnapValid = false; saveSquad(); saveSnapshot(); gStatus = "Squad cleared"; }
+  auto stepButton = [](const char* label, bool enabled, const std::string& tip) {
+    ImGui::SameLine();
+    if (!enabled) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 0.6f)); ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.2f, 0.2f, 0.6f)); ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.2f, 0.2f, 0.2f, 0.6f)); ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1)); }
+    bool clicked = ImGui::Button(label);
+    if (!enabled) ImGui::PopStyleColor(4);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip.c_str());
+    return clicked && enabled;
+  };
+  if (stepButton("Undo", gUndo.canUndo(), gUndo.canUndo() ? "Undo: " + gUndo.undoLabel() + " (up to 2 steps)" : std::string("Nothing to undo"))) doUndo();
+  if (stepButton("Redo", gUndo.canRedo(), gUndo.canRedo() ? "Redo: " + gUndo.redoLabel() : std::string("Nothing to redo"))) doRedo();
   ImGui::Text("%d members", (int)gRoster.size());
   int b = countStanding(Standing::Blocked), f = countStanding(Standing::Flagged), t = countStanding(Standing::Trusted);
   if (b) { ImGui::SameLine(); ImGui::TextColored(standingColor(Standing::Blocked), "  %d blocked", b); }
