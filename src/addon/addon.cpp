@@ -4,6 +4,7 @@
 #include "imgui.h"
 #include "icon_png.hpp"
 #include "role_icons.hpp"
+#include "../core/exchange.hpp"
 #include "../core/history.hpp"
 #include "../core/match.hpp"
 #include "../core/roles.hpp"
@@ -255,6 +256,23 @@ void doUpdate() {
   alert(gStatus);
 }
 
+// Copy / paste exchange with the Raid Squad Composer (see core/exchange.hpp): the clipboard is the only link.
+void doCopyForComposer() {
+  if (gRoster.size() == 0) { gStatus = "Nothing to copy: squad list is empty"; alert(gStatus); return; }
+  std::string blob = buildExchange(gRoles, gAssign, gRoster.sorted());
+  gStatus = clipboardWrite(blob) ? "Copied " + std::to_string(gRoster.size()) + " members for the composer (paste it there with 'Paste from Squad Watch')" : "Could not open the clipboard";
+  alert(gStatus);
+}
+void doPasteFromComposer() {
+  std::vector<ExchangeMember> in; std::string err;
+  if (!parseExchange(clipboardRead(), &in, &err)) { gStatus = err; alert(gStatus); return; }
+  gUndo.record(captureState(), "Paste from composer");
+  ExchangeReport rep = applyExchange(gRoster, gAssign, gRoles, in);
+  saveSquad(); saveAssignments(); refreshSnapshot();
+  gStatus = describeExchange(rep);
+  alert(gStatus.size() > 120 ? gStatus.substr(0, 117) + "..." : gStatus);
+}
+
 void removeMember(const Member& m) {
   const std::string who = m.account.empty() ? m.character : m.account;
   gRoster.remove(who); gAssign.set(who, ""); gAssign.setTank(who, false);   // snapshot kept: the next update still reports this player as left
@@ -414,6 +432,10 @@ void drawMemberRow(const Member& m, int idx) {
 }
 
 void drawSquadTab() {
+  if (ImGui::Button("Copy for composer")) doCopyForComposer();
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies the squad with subgroups and roles so the Raid Squad Composer can read it\n(Squad editor / Role tracking: 'Paste from Squad Watch').");
+  ImGui::SameLine(); if (ImGui::Button("Paste from composer")) doPasteFromComposer();
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Applies the subgroups and roles copied from the composer ('Copy for Squad Watch') to the people already in this list.\nPeople who are not in the pasted text stay as they are. If the list is empty, the pasted squad becomes the list.\nUndo steps this back.");
   if (ImGui::Button("Copy squad")) { if (gRoster.size()) { doCopy(); } else gStatus = "Nothing to copy: squad list is empty"; }
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies the list to the clipboard using the format set in Nexus options");
   ImGui::SameLine(); ImGui::TextDisabled("Copy by role:");

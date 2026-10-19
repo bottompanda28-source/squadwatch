@@ -13,7 +13,7 @@ endif()
 
 add_library(squadwatch_core STATIC
   src/core/unicode_tables.cpp src/core/text.cpp src/core/match.cpp
-  src/core/watchlist.cpp src/core/roster.cpp src/core/roles.cpp src/core/history.cpp)
+  src/core/watchlist.cpp src/core/roster.cpp src/core/roles.cpp src/core/history.cpp src/core/exchange.cpp)
 target_include_directories(squadwatch_core PUBLIC src/core ${json_SOURCE_DIR}/single_include)
 if(MSVC)
   target_compile_options(squadwatch_core PUBLIC /utf-8 /W3)

@@ -1,3 +1,4 @@
+#include "../src/core/exchange.hpp"
 #include "../src/core/history.hpp"
 #include "../src/core/match.hpp"
 #include "../src/core/roles.hpp"
@@ -207,8 +208,83 @@ static void testUndo() {
   u.clear(); CHECK(!u.canUndo());
 }
 
+static void testExchange() {
+  RoleSet rs = RoleSet::defaults();
+  Roster r; Assignments a;
+  r.mergePaste(parsePaste("Alpha.1111, Alpha Char\nBravo.2222, Bravo Char\nCharlie.3333\nDelta.4444, Delta Char"));
+  r.setSubgroup("Alpha.1111", 1); r.setSubgroup("Bravo.2222", 2);   // Charlie / Delta: no subgroup
+  a.set("Alpha.1111", "boonheal__quick"); a.setTank("Alpha.1111", true); a.set("Bravo.2222", "dps");
+
+  // export: everybody, including people without subgroup / role
+  std::string blob = buildExchange(rs, a, r.members());
+  CHECK(blob.find('\n') == std::string::npos);
+  CHECK(blob.find("\"gw2squad\":1") != std::string::npos);
+  std::vector<ExchangeMember> back; std::string err;
+  CHECK(parseExchange(blob, &back, &err));
+  CHECK(back.size() == 4);
+  if (back.size() == 4) {
+    CHECK_EQ(back[0].account, "Alpha.1111"); CHECK_EQ(back[0].character, "Alpha Char"); CHECK_EQ(back[0].role, "boonheal__quick");
+    CHECK(back[0].subgroup == 2 && back[0].tank);                         // 0-based 1 -> 1-based 2
+    CHECK(back[2].subgroup == 0 && back[2].role.empty() && back[2].character.empty());
+  }
+
+  // text around the blob (fences, chat noise) is tolerated; garbage is refused with a message
+  CHECK(parseExchange("here:\n```\n" + blob + "\n```\nthanks", &back, &err) && back.size() == 4);
+  CHECK(!parseExchange("Alpha.1111, Alpha Char", &back, &err) && !err.empty());
+  CHECK(!parseExchange("{\"foo\":1}", &back, &err));
+  CHECK(!parseExchange(blob.substr(0, blob.size() / 2) + "}", &back, &err));
+  CHECK(!parseExchange("{\"gw2squad\":1,\"members\":[]}", &back, &err));
+
+  // what the composer writes: react names, with or without the number, subgroup numbers 2/3, an unknown role
+  const char* fromComposer =
+    "{\"gw2squad\":1,\"src\":\"composer\",\"members\":["
+    "{\"a\":\"alpha.1111\",\"r\":\"boonheal__alac\",\"s\":3},"        // same account, other case
+    "{\"a\":\"Bravo\",\"r\":\"boondps__quick\",\"s\":2},"             // no number
+    "{\"a\":\"Delta Char\",\"r\":\"dps\",\"s\":2},"                   // character name instead of account
+    "{\"a\":\"Charlie.9999\",\"r\":\"hk\",\"s\":2},"                  // wrong number: a different account
+    "{\"a\":\"Zed.5555\",\"r\":\"made_up_role\",\"s\":3},"            // not in the squad
+    "{\"a\":\"Echo\",\"r\":\"made_up_role\",\"s\":3,\"t\":1},"
+    "{\"a\":\"Charlie.3333\",\"r\":\"made_up_role\"}]}";           // matched, but this addon has no such role
+  std::vector<ExchangeMember> in; CHECK(parseExchange(fromComposer, &in, &err)); CHECK(in.size() == 7);
+  ExchangeReport rep = applyExchange(r, a, rs, in);
+  CHECK(rep.total == 7 && rep.matched == 4 && rep.added == 0);
+  auto find = [&](const char* acct) { for (auto& m : r.members()) if (m.account == acct) return m; return Member(); };
+  CHECK(find("Alpha.1111").subgroup == 2 && a.get("Alpha.1111") == "boonheal__alac");
+  CHECK(a.isTank("Alpha.1111"));                                          // kept: still a healer and the paste did not clear it
+  CHECK(find("Bravo.2222").subgroup == 1 && a.get("Bravo.2222") == "boondps__quick");
+  CHECK(find("Delta.4444").subgroup == 1 && a.get("Delta.4444") == "dps"); // matched through the character name
+  CHECK(find("Charlie.3333").subgroup == -1 && a.get("Charlie.3333").empty());
+  CHECK(rep.notInSquad.size() == 3);                                       // Charlie.9999, Zed.5555, Echo
+  CHECK(rep.unknownRoles.size() == 1 && rep.unknownRoles[0] == "made_up_role");
+  CHECK(!describeExchange(rep).empty());
+
+  // tank flag: applied to healers only; a non-heal role drops an old tank mark
+  Roster r2; Assignments a2;
+  r2.mergePaste(parsePaste("P.1111\nQ.2222"));
+  std::vector<ExchangeMember> t2;
+  CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"P.1111\",\"r\":\"boonheal__quick\",\"s\":2,\"t\":1},{\"a\":\"Q.2222\",\"r\":\"dps\",\"s\":3,\"t\":1}]}", &t2, &err));
+  rep = applyExchange(r2, a2, rs, t2);
+  CHECK(a2.isTank("P.1111") && !a2.isTank("Q.2222") && rep.tanks == 1);
+
+  // empty squad list: the pasted squad becomes the list
+  Roster r3; Assignments a3;
+  rep = applyExchange(r3, a3, rs, in);
+  CHECK(r3.size() == 7 && rep.added == 7 && rep.matched == 7 && rep.notInSquad.empty());
+  CHECK(a3.get("alpha.1111") == "boonheal__alac");
+  bool sawBravo = false; for (auto& m : r3.members()) if (m.character == "Bravo") { sawBravo = true; CHECK(m.account.empty() && m.subgroup == 1); }
+  CHECK(sawBravo);
+
+  // two entries never claim the same member
+  Roster r4; Assignments a4;
+  r4.mergePaste(parsePaste("Same.1111, X"));
+  std::vector<ExchangeMember> t4;
+  CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"Same\",\"r\":\"dps\",\"s\":2},{\"a\":\"Same.1111\",\"r\":\"hk\",\"s\":3}]}", &t4, &err));
+  rep = applyExchange(r4, a4, rs, t4);
+  CHECK(rep.matched == 1 && a4.get("Same.1111") == "hk" && r4.members()[0].subgroup == 2);   // exact account text wins
+}
+
 int main() {
-  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo();
+  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo(); testExchange();
   std::printf("%d checks, %d failed\n", g_n, g_fail);
   return g_fail ? 1 : 0;
 }
