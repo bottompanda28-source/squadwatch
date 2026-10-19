@@ -14,6 +14,7 @@
 #include "../core/watchlist.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -62,6 +63,11 @@ int gCopySub = -2;                     // subgroup for "Copy by role": -2 all su
 struct AppState { std::string squad, assign, snapshot, log; bool snapValid = false; };
 UndoStack<AppState> gUndo(2);          // undo/redo for update / clear actions
 std::string gWatchStatus;
+// Squad table column widths (content px) for Player / Role / Sub / Prefers: 0 = default. Dragged by the user, kept in config.json.
+float gColW[4] = {0.f, 0.f, 0.f, 0.f};
+float gColNow[4] = {0.f, 0.f, 0.f, 0.f};   // as measured in the first row this frame
+bool gColCapture = false;
+void captureCol(int c) { if (gColCapture && c >= 0 && c < 4) gColNow[c] = ImGui::GetContentRegionAvail().x; }
 fs::path gDir;
 
 fs::path P(const char* f) { return gDir / fs::u8path(f); }
@@ -130,7 +136,7 @@ void saveConfig() {
   nlohmann::json j;
   j["colonPrefix"] = gCopy.colonPrefix; j["includeCharacter"] = gCopy.includeCharacter; j["includeSubgroup"] = gCopy.includeSubgroup;
   j["sortBySubgroup"] = gCopy.sortBySubgroup; j["colSep"] = gCopy.colSep; j["rowSep"] = gCopy.rowSep;
-  j["useLive"] = gUseLive; j["need"] = gNeed; j["showTags"] = gShowTags; j["showNotes"] = gShowNotes; j["maxTags"] = gMaxTags; j["visible"] = gVisible;
+  j["useLive"] = gUseLive; j["need"] = gNeed; j["showTags"] = gShowTags; j["showNotes"] = gShowNotes; j["maxTags"] = gMaxTags; j["visible"] = gVisible; j["colW"] = std::vector<float>(gColW, gColW + 4);
   writeFile(P("config.json"), j.dump(2));
 }
 void loadConfig() {
@@ -145,6 +151,8 @@ void loadConfig() {
     b("useLive", gUseLive); b("showTags", gShowTags); b("showNotes", gShowNotes); b("visible", gVisible);
     if (j.contains("need") && j["need"].is_object())
       for (auto it = j["need"].begin(); it != j["need"].end(); ++it) if (it.value().is_number_integer()) gNeed[it.key()] = std::max(0, std::min(50, it.value().get<int>()));
+    if (j.contains("colW") && j["colW"].is_array() && j["colW"].size() == 4)
+      for (int i = 0; i < 4; ++i) if (j["colW"][i].is_number()) { float w = j["colW"][i].get<float>(); gColW[i] = (w >= 30.f && w <= 800.f) ? w : 0.f; }
     if (j.contains("maxTags") && j["maxTags"].is_number_integer()) gMaxTags = std::min(6, std::max(0, j["maxTags"].get<int>()));
   } catch (...) { logI("config.json unreadable, using defaults"); }
 }
@@ -378,7 +386,7 @@ void drawMemberRow(const Member& m, int idx) {
 
   ImGui::TableNextRow();
   ImGui::PushID(idx);
-  ImGui::TableNextColumn();
+  ImGui::TableNextColumn(); captureCol(0);
   ImGui::TextColored(standingColor(st), "%s", who.c_str());
   bool nameHovered = ImGui::IsItemHovered();
   if (ImGui::IsItemClicked()) copyText(stripAccountSuffix(who), "name");
@@ -390,7 +398,7 @@ void drawMemberRow(const Member& m, int idx) {
     ImGui::SetTooltip("%s", tip.c_str());
   }
   // role (+ tank toggle for healers)
-  ImGui::TableNextColumn();
+  ImGui::TableNextColumn(); captureCol(1);
   const RoleDef* rd = gRoles.find(role);
   if (rd && drawRoleIcon(rd->icon, 18.f)) ImGui::SameLine();
   std::string label = role.empty() ? "-" : gRoles.labelOf(role);
@@ -414,7 +422,7 @@ void drawMemberRow(const Member& m, int idx) {
   }
 
   // subgroup
-  ImGui::TableNextColumn();
+  ImGui::TableNextColumn(); captureCol(2);
   std::string sgLabel = m.subgroup >= 0 ? "Sub " + std::to_string(m.subgroup + 1) : std::string("Sub -");
   if (ImGui::SmallButton((sgLabel + "##sg").c_str())) ImGui::OpenPopup("sgpick");
   if (ImGui::BeginPopup("sgpick")) {
@@ -428,7 +436,7 @@ void drawMemberRow(const Member& m, int idx) {
   }
 
   // preferred role (a marker for the squad leader; it changes nothing else)
-  ImGui::TableNextColumn();
+  ImGui::TableNextColumn(); captureCol(3);
   {
     std::string pref = gAssign.getPrefer(who);
     const RoleDef* pd = gRoles.find(pref);
@@ -494,8 +502,8 @@ void drawSquadTab() {
   std::vector<Member> list = gRoster.sorted();
   if (list.empty()) { ImGui::TextDisabled("Squad is empty. Copy the list from Squad Attendance, then press Update from clipboard."); return; }
   pushTableBorderColors();
-  // Column widths: Role (and Prefers) are as wide as the widest role needs and no wider; Player and Watchlist share the rest,
-  // Player winning. (ImGui 1.80 cannot cap a stretch column, so the role width is measured once and used as a fixed width.)
+  // Column widths can be dragged (header dividers). Defaults: Player 190, Role/Prefers sized for the longest role but capped,
+  // Watchlist takes whatever is left. Dragged widths are remembered in config.json.
   static float sRoleW = 0.f, sPrefW = 0.f;
   if (sRoleW <= 0.f) {
     const ImGuiStyle& st = ImGui::GetStyle();
@@ -506,15 +514,16 @@ void drawSquadTab() {
       sRoleW = std::max(sRoleW, label + (r.roleClass == "heal" ? tankW : 0.f));
       sPrefW = std::max(sPrefW, label);
     }
-    sRoleW += st.CellPadding.x * 2.f + 4.f; sPrefW += st.CellPadding.x * 2.f + 4.f;
+    sRoleW = std::min(sRoleW, 175.f); sPrefW = std::min(sPrefW, 130.f);
   }
-  if (ImGui::BeginTable("squad", 6, kTableFlags)) {
-    ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch, 3.f);
-    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, sRoleW);
-    ImGui::TableSetupColumn("Sub", ImGuiTableColumnFlags_WidthFixed, 55.f);
-    ImGui::TableSetupColumn("Prefers", ImGuiTableColumnFlags_WidthFixed, sPrefW);
-    ImGui::TableSetupColumn("Watchlist", ImGuiTableColumnFlags_WidthStretch, 2.f);
-    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.f);
+  const float defW[4] = {190.f, sRoleW, 55.f, sPrefW};
+  if (ImGui::BeginTable("squad", 6, kTableFlags | ImGuiTableFlags_Resizable)) {
+    ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthFixed, gColW[0] > 0.f ? gColW[0] : defW[0]);
+    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, gColW[1] > 0.f ? gColW[1] : defW[1]);
+    ImGui::TableSetupColumn("Sub", ImGuiTableColumnFlags_WidthFixed, gColW[2] > 0.f ? gColW[2] : defW[2]);
+    ImGui::TableSetupColumn("Prefers", ImGuiTableColumnFlags_WidthFixed, gColW[3] > 0.f ? gColW[3] : defW[3]);
+    ImGui::TableSetupColumn("Watchlist", ImGuiTableColumnFlags_WidthStretch, 1.f);
+    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 24.f);
     ImGui::TableHeadersRow();
     int lastGroup = -2;
     for (size_t i = 0; i < list.size(); ++i) {
@@ -525,9 +534,17 @@ void drawSquadTab() {
         ImGui::TableNextColumn();
         if (lastGroup >= 0) ImGui::Text("Subgroup %d  (%d)", lastGroup + 1, n); else ImGui::Text("No subgroup  (%d)", n);
       }
+      gColCapture = (i == 0);
       drawMemberRow(list[i], (int)i);
+      gColCapture = false;
     }
     ImGui::EndTable();
+    if (!ImGui::IsMouseDown(0) && gColNow[0] > 0.f) {   // remember dragged widths once the mouse is released
+      bool changed = false;
+      for (int i = 0; i < 4; ++i)
+        if (gColNow[i] >= 30.f && std::fabs(gColNow[i] - (gColW[i] > 0.f ? gColW[i] : defW[i])) >= 2.f) { gColW[i] = gColNow[i]; changed = true; }
+      if (changed) saveConfig();
+    }
   }
   popTableBorderColors();
 }
@@ -720,7 +737,7 @@ void AddonUnload() {
 }
 
 AddonDefinition_t gDef = {
-  0x53515744, NEXUS_API_VERSION, kName, {0, 2, 0, 0}, "Squad Watch contributors",
+  0x53515744, NEXUS_API_VERSION, kName, {0, 8, 0, 0}, "Squad Watch contributors",
   "Squad list with watchlist markers, subgroups, role assignment and change report. Update the squad from the clipboard.",
   AddonLoad, AddonUnload, AF_None, UP_None, nullptr
 };
