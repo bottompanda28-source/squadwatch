@@ -67,6 +67,7 @@ std::string gWatchStatus;
 float gColW[4] = {0.f, 0.f, 0.f, 0.f};
 float gColNow[4] = {0.f, 0.f, 0.f, 0.f};   // as measured in the first row this frame
 bool gColCapture = false;
+float gWin[4] = {0.f, 0.f, 0.f, 0.f};   // window x, y, width, height as last left by the user (0 = not saved yet)
 void captureCol(int c) { if (gColCapture && c >= 0 && c < 4) gColNow[c] = ImGui::GetContentRegionAvail().x; }
 fs::path gDir;
 
@@ -136,7 +137,7 @@ void saveConfig() {
   nlohmann::json j;
   j["colonPrefix"] = gCopy.colonPrefix; j["includeCharacter"] = gCopy.includeCharacter; j["includeSubgroup"] = gCopy.includeSubgroup;
   j["sortBySubgroup"] = gCopy.sortBySubgroup; j["colSep"] = gCopy.colSep; j["rowSep"] = gCopy.rowSep;
-  j["useLive"] = gUseLive; j["need"] = gNeed; j["showTags"] = gShowTags; j["showNotes"] = gShowNotes; j["maxTags"] = gMaxTags; j["visible"] = gVisible; j["colW"] = std::vector<float>(gColW, gColW + 4);
+  j["useLive"] = gUseLive; j["need"] = gNeed; j["showTags"] = gShowTags; j["showNotes"] = gShowNotes; j["maxTags"] = gMaxTags; j["visible"] = gVisible; j["colW"] = std::vector<float>(gColW, gColW + 4); j["win"] = std::vector<float>(gWin, gWin + 4);
   writeFile(P("config.json"), j.dump(2));
 }
 void loadConfig() {
@@ -151,6 +152,8 @@ void loadConfig() {
     b("useLive", gUseLive); b("showTags", gShowTags); b("showNotes", gShowNotes); b("visible", gVisible);
     if (j.contains("need") && j["need"].is_object())
       for (auto it = j["need"].begin(); it != j["need"].end(); ++it) if (it.value().is_number_integer()) gNeed[it.key()] = std::max(0, std::min(50, it.value().get<int>()));
+    if (j.contains("win") && j["win"].is_array() && j["win"].size() == 4)
+      for (int i = 0; i < 4; ++i) if (j["win"][i].is_number()) gWin[i] = j["win"][i].get<float>();
     if (j.contains("colW") && j["colW"].is_array() && j["colW"].size() == 4)
       for (int i = 0; i < 4; ++i) if (j["colW"][i].is_number()) { float w = j["colW"][i].get<float>(); gColW[i] = (w >= 30.f && w <= 800.f) ? w : 0.f; }
     if (j.contains("maxTags") && j["maxTags"].is_number_integer()) gMaxTags = std::min(6, std::max(0, j["maxTags"].get<int>()));
@@ -355,15 +358,24 @@ bool drawRoleIcon(const std::string& icon, float size) {
 
 void drawTags(const WlEntry& e, const std::string& roleClass) {
   VisibleTags v = gWatch.pickVisibleTags(e, roleClass, (size_t)gMaxTags);
+  size_t drawn = 0;
+  // A flagged / blocked player's performance level (Terrible / Awful / Bad / Mediocre) always comes first; it does not use up a tag slot.
+  Standing st = Watchlist::standing(&e);
+  if (!e.severity.empty() && (st == Standing::Flagged || st == Standing::Blocked)) {
+    ImGui::TextColored(ImVec4(0.95f, 0.50f, 0.40f, 1), "%s", Watchlist::severityLabel(e.severity).c_str());
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Performance level");
+    ++drawn;
+  }
   for (size_t i = 0; i < v.shown.size(); ++i) {
     const VisibleTag& t = v.shown[i];
-    ImGui::SameLine(0, i ? 8.f : 0.f);
+    if (drawn) ImGui::SameLine(0, 8.f);
+    ++drawn;
     ImGui::TextColored(t.role ? ImVec4(0.55f, 0.80f, 1.f, 1) : (t.pin ? ImVec4(1.f, 0.85f, 0.5f, 1) : ImVec4(0.75f, 0.75f, 0.75f, 1)), "%s", t.name.c_str());
     std::string tip = gWatch.tagTitle(t.name);
     if (!tip.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip.c_str());
   }
   if (!v.hidden.empty()) {
-    ImGui::SameLine(0, 8.f);
+    if (drawn) ImGui::SameLine(0, 8.f);
     ImGui::TextDisabled("+%d more", (int)v.hidden.size());
     if (ImGui::IsItemHovered()) { std::string s; for (auto& h : v.hidden) s += (s.empty() ? "" : "\n") + h; ImGui::SetTooltip("%s", s.c_str()); }
   }
@@ -635,7 +647,24 @@ void renderWindow() {
   drainEvents();
   if (!gVisible) return;
   ImGui::SetNextWindowSize(ImVec2(700, 440), ImGuiCond_FirstUseEver);
+  // Restore the window as the user left it last session (our own copy, in case Nexus does not keep ImGui's .ini).
+  static bool sGeomApplied = false;
+  if (!sGeomApplied) {
+    sGeomApplied = true;
+    const ImVec2 disp = ImGui::GetIO().DisplaySize;
+    if (gWin[2] >= 300.f && gWin[3] >= 150.f && disp.x > 0.f && gWin[0] >= 0.f && gWin[1] >= 0.f && gWin[0] < disp.x - 100.f && gWin[1] < disp.y - 60.f) {
+      ImGui::SetNextWindowPos(ImVec2(gWin[0], gWin[1]), ImGuiCond_Once);
+      ImGui::SetNextWindowSize(ImVec2(std::min(gWin[2], disp.x), std::min(gWin[3], disp.y)), ImGuiCond_Once);
+    }
+  }
   if (!ImGui::Begin(kWindow, &gVisible, ImGuiWindowFlags_None)) { ImGui::End(); return; }
+  {
+    const ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+    if (!ImGui::IsMouseDown(0) && (std::fabs(wp.x - gWin[0]) >= 2.f || std::fabs(wp.y - gWin[1]) >= 2.f || std::fabs(ws.x - gWin[2]) >= 2.f || std::fabs(ws.y - gWin[3]) >= 2.f)) {
+      gWin[0] = wp.x; gWin[1] = wp.y; gWin[2] = ws.x; gWin[3] = ws.y;
+      saveConfig();
+    }
+  }
   if (ImGui::Button("Update from clipboard")) doUpdate();
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Replaces the squad with the list on the clipboard (Account.1234, Character per line).\nAccounts missing from it are treated as having left. Subgroups and roles are kept.");
   ImGui::SameLine(); if (ImGui::Button("Reload watchlist")) { loadWatchlist(); gStatus = "Watchlist: " + gWatchStatus; }
@@ -737,7 +766,7 @@ void AddonUnload() {
 }
 
 AddonDefinition_t gDef = {
-  0x53515744, NEXUS_API_VERSION, kName, {0, 8, 0, 0}, "Squad Watch contributors",
+  0x53515744, NEXUS_API_VERSION, kName, {0, 9, 0, 0}, "Squad Watch contributors",
   "Squad list with watchlist markers, subgroups, role assignment and change report. Update the squad from the clipboard.",
   AddonLoad, AddonUnload, AF_None, UP_None, nullptr
 };
