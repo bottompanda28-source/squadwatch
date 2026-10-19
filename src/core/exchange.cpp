@@ -77,6 +77,9 @@ bool sameName(const std::string& x, const std::string& y) {
 }
 // 3 = same account text, 2 = same account name, 1 = matched through a character name, 0 = no match
 int score(const ExchangeMember& e, const Member& m) {
+  // The account is the truth: two known, different account numbers are two different people, whatever the characters say.
+  std::string en = numberOf(e.account), mn = numberOf(m.account);
+  if (!en.empty() && !mn.empty() && en != mn) return 0;
   if (!e.account.empty() && !m.account.empty()) {
     if (fullKey(e.account) == fullKey(m.account)) return 3;
     if (sameName(e.account, m.account)) return 2;

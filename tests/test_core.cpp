@@ -274,6 +274,14 @@ static void testExchange() {
   bool sawBravo = false; for (auto& m : r3.members()) if (m.character == "Bravo") { sawBravo = true; CHECK(m.account.empty() && m.subgroup == 1); }
   CHECK(sawBravo);
 
+  // a shared character name never overrides two different known accounts
+  Roster r5; Assignments a5;
+  r5.mergePaste(parsePaste("Yan.1111, Shared Char"));
+  std::vector<ExchangeMember> t5;
+  CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"Zed.9999\",\"c\":\"Shared Char\",\"r\":\"dps\",\"s\":2}]}", &t5, &err));
+  rep = applyExchange(r5, a5, rs, t5);
+  CHECK(rep.matched == 0 && rep.notInSquad.size() == 1);
+
   // two entries never claim the same member
   Roster r4; Assignments a4;
   r4.mergePaste(parsePaste("Same.1111, X"));
