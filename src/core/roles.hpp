@@ -60,6 +60,10 @@ std::vector<BoardRow> buildBoard(const RoleSet& roles, const Assignments& a, con
 // Composer-style "copy by role" text: "Name1, Name2 - Role Label; Name3 - Other Role" (account numbers removed).
 // roleClass: "" = every role, otherwise heal / boondps / dps / specialty. Only assigned members are included.
 std::string copyByRole(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present, const std::string& roleClass);
+// LFG text for the roles still open: "1quickdps, 2alacheal, dps". Every role with need > holders gets "<missing><shortname>"
+// (lower case); pure DPS never gets a quantity and is appended when fewer than `target` people (roster + open seats of the
+// other roles) would be in the squad, or when the DPS role itself has open seats. Empty string = nothing to look for.
+std::string lfgRolesText(const std::vector<BoardRow>& board, int rosterSize, int target = 10);
 std::string copyOneRole(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present, const std::string& code);
 
 }

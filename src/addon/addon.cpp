@@ -603,6 +603,12 @@ void drawRolesTab() {
   ImGui::SameLine();
   if (ImGui::Button("Assign unassigned as DPS")) assignUnassignedDps();
   ImGui::SameLine();
+  if (ImGui::Button("LFG Roles")) copyText(lfgRolesText(board, gRoster.size()), "LFG roles");
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies LFG text for the roles still open, e.g. \"1quickdps, dps\".\nDPS fills the squad up to 10 once the other open roles are counted.");
+  ImGui::SameLine();
+  if (ImGui::Button("Zero all needs")) { for (const auto& r : gRoles.roles()) gNeed[r.code] = 0; saveConfig(); gStatus = "Need set to 0 for every role"; }
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sets the Need of every role to 0 (no target)");
+  ImGui::SameLine();
   if (ImGui::Button("Clear all roles")) { gUndo.record(captureState(), "Clear all roles"); gAssign.clear(); saveAssignments(); refreshSnapshot(); }
   ImGui::TextDisabled("Need = how many seats you want filled; 0 means no target. Click a role row to copy its players.");
 }
@@ -766,7 +772,7 @@ void AddonUnload() {
 }
 
 AddonDefinition_t gDef = {
-  0x53515744, NEXUS_API_VERSION, kName, {0, 9, 0, 0}, "Squad Watch contributors",
+  0x53515744, NEXUS_API_VERSION, kName, {0, 10, 0, 0}, "Squad Watch contributors",
   "Squad list with watchlist markers, subgroups, role assignment and change report. Update the squad from the clipboard.",
   AddonLoad, AddonUnload, AF_None, UP_None, nullptr
 };

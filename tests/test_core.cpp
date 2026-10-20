@@ -285,8 +285,25 @@ static void testExchange() {
   ar.clear(); CHECK(ar.getPrefer("P.1111") == "hk");     // Clear all roles keeps prefers
 }
 
+void testLfg() {
+  RoleSet rs = RoleSet::defaults();
+  auto row = [&](const char* code, int need, int have) {
+    BoardRow r; r.role = *rs.find(code); r.need = need; r.open = std::max(0, need - have); return r; };
+  std::vector<BoardRow> b = { row("boondps__quick", 2, 1), row("dps", 0, 0), row("hk", 1, 1) };
+  CHECK_EQ(lfgRolesText(b, 6), "1quickdps, dps");           // user's example
+  CHECK_EQ(lfgRolesText(b, 9), "1quickdps");                // 9 + 1 open = 10, no dps filler
+  b = { row("boonheal__alac", 2, 0), row("boondps__alac", 1, 0) };
+  CHECK_EQ(lfgRolesText(b, 5), "2alacheal, 1alacdps, dps"); // 5+3 < 10
+  CHECK_EQ(lfgRolesText(b, 7), "2alacheal, 1alacdps");
+  b = { row("dps", 3, 0) };
+  CHECK_EQ(lfgRolesText(b, 10), "dps");                      // DPS role open: no quantity
+  b = { row("hk", 0, 0) };
+  CHECK_EQ(lfgRolesText(b, 10), "");                         // full squad, nothing open
+  CHECK_EQ(lfgRolesText(b, 8), "dps");
+}
+
 int main() {
-  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo(); testExchange();
+  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo(); testExchange(); testLfg();
   std::printf("%d checks, %d failed\n", g_n, g_fail);
   return g_fail ? 1 : 0;
 }

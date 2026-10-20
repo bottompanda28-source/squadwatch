@@ -1,5 +1,6 @@
 #include "roles.hpp"
 #include <algorithm>
+#include <cctype>
 #include <functional>
 #include "match.hpp"
 #include "text.hpp"
@@ -122,6 +123,23 @@ std::vector<BoardRow> buildBoard(const RoleSet& roles, const Assignments& a, con
   return rows;
 }
 
+
+std::string lfgRolesText(const std::vector<BoardRow>& board, int rosterSize, int target) {
+  std::string out;
+  int claimed = 0;
+  bool dps = false;
+  for (const auto& row : board) {
+    if (row.open <= 0) continue;
+    claimed += row.open;
+    if (row.role.code == "dps") { dps = true; continue; }
+    std::string tok = row.role.shortName;
+    for (auto& c : tok) c = (char)std::tolower((unsigned char)c);
+    out += (out.empty() ? "" : ", ") + std::to_string(row.open) + tok;
+  }
+  if (!dps && rosterSize + claimed < target) dps = true;
+  if (dps) out += (out.empty() ? "" : ", ") + std::string("dps");
+  return out;
+}
 
 static std::string groupText(const RoleSet& roles, const Assignments& a, const std::vector<Member>& present, const std::function<bool(const RoleDef&)>& pick) {
   std::string out;
