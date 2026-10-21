@@ -1,0 +1,66 @@
+# Squad Watch: project context (living document)
+
+Edit this file whenever a decision or behaviour changes. Keep it short; details live in the code and README.
+Related: `WATCHLIST_CONTEXT.md` (the watchlist tool and its JSON export).
+
+## What this is
+Three tools for running Guild Wars 2 raids, all single-purpose and personal:
+1. **gw2-watchlist.html**: personal blocklist / bad-players / trusted list (see WATCHLIST_CONTEXT.md).
+2. **raid_squad_composer.html**: builds squads from Discord reacts, syncs the watchlist, matches names against it, stores Discord IDs.
+3. **Squad Watch** (this project): a standalone Nexus (Raidcore) in-game addon: a squad window with watchlist markers, subgroups, roles, change history. Needs no Unofficial Extras.
+
+## Workflow the addon fits
+Squad Attendance (separate addon) copies the squad list to the clipboard -> press **Update from clipboard** in Squad Watch. The pasted list is the truth: an account missing from it has left; a character-name change is fine. Roles and subgroups are assigned by hand in the window.
+
+## Design choices (and why)
+- **Own window, not the game's squad panel.** Addons cannot draw on the native squad UI.
+- **Clipboard is the roster source.** ArcDPS live squad events (`EV_ARCDPS_SQUAD_JOIN/LEAVE`, replay on load) exist but are an opt-in option, off by default, so they cannot fight the pasted list.
+- **Identity = account name** (case-insensitive, leading `:` stripped). Character names are display/fallback only.
+- **Matching is a port of the composer's** `wlCandidateVariants` / `watchlistMatch` (decorated names, `a / b`, notes in brackets, character fallback, worst severity wins). Verified identical on 9,508 names.
+- **Standing colours the account name**: red blocked, yellow flagged, green trusted. No text labels in the Watchlist column; it shows tags only (role-relevant first, then pinned, max 3, "+N more"; a parent tag is hidden when its child is present).
+- **Roles are built in** (no roles file). Order: Quick Heal, Alac Heal, Quick DPS, Alac DPS, DPS, VG Condi DPS, HK, Pusher, G1, Kite G2, Q1 Kite, Lamp, Mat Tank, Q2 Kite, Ranged DPS, Decima Kite. Internal ids keep old names (e.g. `qtp_pylon_kiter` = Q2 Kite) so saved data survives renames.
+- **Need counter per role** (0 = no target) instead of fixed seat counts, because the required roles differ per run. OPEN shows only when need > 0.
+- **LFG Roles (v0.10, Roles tab):** copies e.g. `1quickdps, dps`: every role with open seats as `<missing><shortname lower case>` (`2alacheal`), then plain `dps` (never a quantity) when roster + open seats of the other roles is under 10, or the DPS role itself has open seats. Nothing open and squad >= 10 copies nothing. Logic: `lfgRolesText` in `core/roles.cpp`. **Zero all needs** button sets every role's Need to 0.
+- **Tank** is a toggle shown only on heal roles; it is a marker, nothing more. Cleared if the role stops being a heal.
+- **Squad table widths (v0.8):** columns are user-resizable (drag the header dividers): Player, Role, Sub, Prefers are fixed-width columns (defaults 190 / widest role capped at 175 / 55 / widest label capped at 130), Watchlist takes the rest. Dragged widths are read back from the first row (content width) after the mouse is released and kept in `config.json` (`colW`), so they survive restarts. The addon version in Nexus is now 0.8.0 so the loaded build can be told apart.
+- **Squad tab columns:** Player | Role | Sub | Prefers | Watchlist | remove. Subgroups 1-10 assigned by hand; list is grouped by subgroup.
+- **Copying:** click a name -> account without `.1234`. *Copy by role* uses the composer format `Name1, Name2 - Role; Name3 - Role`, limited by a subgroup picker (All subs / Sub N) because the in-game chat holds **199 characters** (the status line warns above that). Roles tab: click a role row to copy that role. *Copy squad* writes `Account.1234, Character` as UTF-16 so emoji survive.
+- **Composer exchange (v0.5, replace since v0.7):** Squad tab buttons *Copy for composer* / *Paste from composer*; one-line JSON `{"gw2squad":1,"members":[{a,c,r,s,t,p}]}` (`s` 1-based, `p` = Prefers, optional). Core in `src/core/exchange.*`. Paste **replaces** the squad list (no matching against the old list, so an empty or stale list is fine): each entry becomes a member (account if the name is one, else the name is kept as the character), with its subgroup, role, tank (heals only) and preferred role; roles/tanks of the old list are dropped, a preferred role is kept for a player who stays and whose paste has none, a missing character name is kept from the old list, duplicates are skipped, unknown role codes are skipped and reported. Like an update it logs who joined/left in the Changes tab, and it is undoable. The composer does the name cleaning on copy (first valid account, see COMPOSER_CONTEXT).
+- **Prefers (v0.6):** per-player preferred role, a marker only (like Tank): *Prefers* column in the Squad tab (icon + label, click to pick). Stored in `assignments.json` (`prefers`), kept by *Clear all roles*, dropped when the player leaves or is removed, part of undo. Carried in the composer exchange as `p`.
+- **Performance tag first (v0.9):** for a flagged/blocked player the watchlist entry's performance level (Terrible / Awful / Bad / Mediocre) is drawn first in the Watchlist column, in addition to (not counted in) the max tags.
+- **Remembered layout (v0.9):** `config.json` keeps the squad table column widths (`colW`) and the window position/size (`win`; restored once per session, ignored if it would be off screen).
+- **Change tracking:** baseline snapshot (roster + roles) is refreshed whenever a role is assigned and after every update. An update logs who joined and which roles left (unassigned leavers count as DPS). History keeps the last 10; click an entry to copy e.g. `2AlacDPS, 1DPS`. Character swaps are deliberately not reported. A player removed with X is still reported at the next update.
+- **Undo/Redo:** 2 steps for Update, Clear list, Clear all roles. In memory only.
+- **Short names in the "roles that left" text** (no spaces): QuickHeal, AlacHeal, QuickDPS, AlacDPS, DPS, VGCondiDPS, HK, Pusher, G1, KiteG2, Q1Kite, Lamp, MatTank, Q2kite, RangedDPS, DecimaKite. Placeholder choices; change in `src/core/roles.cpp` if the lfg shorthand (aheal, qheal, adps, qdps) is wanted.
+- **Quick-access icon:** transparent white glyph; hotkeys are registered with `"(null)"` (= unbound) so the tooltip shows no `[(null)]`.
+
+## Data (in `<GW2>\addons\SquadWatch\`)
+`gw2-watchlist-data.json` (the watchlist's export; `watchlist.json` also accepted; reload with *Reload watchlist*), `squad.json`, `assignments.json` (roles + tanks), `snapshot.json`, `changes.json`, `config.json` (copy format, option toggles, need counts).
+
+## Layout
+- `src/core/`: portable logic, unit-tested natively: text/unicode, match, watchlist, roster, roles, history, undo. Unicode tables are generated by `tools/gen_unicode_tables.js` so lower-casing and letter checks equal JavaScript's.
+- `src/addon/addon.cpp`: Windows + Nexus + ImGui 1.80 glue; `icon_png.hpp`, `role_icons.hpp` are generated (`tools/gen_icon.js`, `tools/gen_role_icons.py` from the composer's embedded icons).
+- `tools/crosscheck*.js`: compare C++ against the composer's real JS.
+- `.github/workflows/build.yml`: builds on `windows-latest`, runs tests, uploads `squad_watch.dll`; tag `v*` makes a release.
+
+## Verification status (update this honestly)
+- Native: 152 unit checks; matching, tag picking, derived text, name stripping all cross-checked against the composer's JS.
+- Glue is only **syntax-checked** here (stub `windows.h`, real `Nexus.h` v6, ImGui 1.80). The Windows build runs in CI; behaviour is verified by playing. The user reported it working in game after v0.1; later changes (v0.2 onwards: undo, columns, subgroup copy) have not been confirmed.
+
+## Known limits / open items
+- Event payload layout (`EvAgentUpdate`) is from Nexus docs; only matters if live events are enabled.
+- Emoji/CJK names render only if Nexus's font has the glyphs.
+- Decima Kite has no icon (the composer has none). Role icons are 64px PNGs from the composer.
+- Lowercasing is per character, so a word-final capital sigma differs from JS (irrelevant for account names).
+
+## Change log
+- v0.1 first build (roster from events + paste, roles from composer export).
+- v0.2 built-in roles + icons, Update from clipboard, subgroups, remove player, Reload watchlist, Assign unassigned as DPS, transparent icon, `(null)` tooltip fix.
+- v0.3 watchlist filename `gw2-watchlist-data.json`; copy by role / click-to-copy; change history (10), click to copy roles left; tank toggle; role order; Q2 Kite rename; borders; no standing labels.
+- v0.4 Q2 Kite after Mat Tank; undo/redo (2); Role column next to Player; subgroup picker for copy by role.
+- v0.5 Copy for composer / Paste from composer (exchange.hpp/.cpp, 35 new unit checks; glue syntax-checked only).
+- v0.6 Prefers column + `p` in the composer exchange (9 new unit checks).
+- v0.7 Paste from composer replaces the squad list; Role/Prefers column widths follow the widest role.
+- v0.8 Resizable, remembered Squad table columns; Nexus version string now matches the release.
+- v0.9 Performance level first in the Watchlist column; window position/size remembered.
+- v0.10 Roles tab: LFG Roles (clipboard LFG text from open roles, DPS fills to 10) and Zero all needs (7 new unit checks).

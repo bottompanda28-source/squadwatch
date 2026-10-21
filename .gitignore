@@ -1,0 +1,8 @@
+# deploy file that handles the loop:
+# Commit and push.
+# Wait for the build.
+# Download the DLL.
+# Copy it to C:\Program Files\Guild Wars 2\addons\squad_watch.dll
+deploy.ps1
+# if copying to C:Program Files\ ,
+# need admin powershell
