@@ -50,7 +50,10 @@ std::string ChangeLog::toJson() const {
   for (const auto& e : entries_) {
     json left = json::array();
     for (const auto& s : e.left) left.push_back(memberJson(s));
-    arr.push_back({{"time", e.time}, {"joined", e.joined}, {"left", left}});
+    json je = {{"time", e.time}, {"joined", e.joined}, {"left", left}};
+    if (e.live) je["live"] = true;
+    if (e.mass) je["mass"] = true;
+    arr.push_back(je);
   }
   return json{{"version", 1}, {"entries", arr}}.dump(2);
 }
@@ -66,6 +69,8 @@ bool ChangeLog::loadFromJson(const std::string& text) {
       if (je.contains("time") && je["time"].is_string()) e.time = je["time"].get<std::string>();
       if (je.contains("joined") && je["joined"].is_array()) for (const auto& n : je["joined"]) if (n.is_string()) e.joined.push_back(n.get<std::string>());
       if (je.contains("left") && je["left"].is_array()) for (const auto& l : je["left"]) { SnapMember s; if (memberFrom(l, &s)) e.left.push_back(s); }
+      if (je.contains("live") && je["live"].is_boolean()) e.live = je["live"].get<bool>();
+      if (je.contains("mass") && je["mass"].is_boolean()) e.mass = je["mass"].get<bool>();
       v.push_back(e);
       if (v.size() >= kMax) break;
     }

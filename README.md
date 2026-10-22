@@ -11,7 +11,7 @@ A standalone Nexus (Raidcore) addon. It does not need Unofficial Extras.
 - **Tank**: a *Tank* toggle appears next to a player's role when it is Quick or Alac Heal; it only marks that healer as the tank (shown as "(tank)" in the Roles tab).
 - **Roles tab**: all roles built in (Quick/Alac Heal and DPS, DPS, VG Condi DPS, HK, Pusher, G1, Kite G2, Q1 Kite, Lamp, Mat Tank, Q2 Kite, Ranged DPS, Decima Kite). Set how many seats you want per role with `-`/`+` to see OPEN roles at a glance. *Assign unassigned as DPS* fills everyone without a role.
 - **Changes tab**: the last 10 updates that added or removed people (*Clear change log* empties it). Each entry lists who joined, who left and which role each leaver held, plus a "Roles left" line. Leavers are compared against the squad as it was when you last assigned a role (or last updated), so a player you removed with `X` is still reported. Click an entry to copy the roles that left, e.g. `2AlacDPS, 1DPS` (unassigned leavers count as DPS).
-- The squad, subgroups and roles are saved and survive restarts. Optional (off by default, Nexus options): also follow ArcDPS live squad events.
+- The squad, subgroups and roles are saved and survive restarts. Optional (off by default, Nexus options): also follow ArcDPS live squad events (experimental fallback). In that mode a leave is only reported in the Changes tab once the player has been away for the **grace period** (default 15 s, adjustable) and has not come back, on any character (their role is kept per account); many leaves at once (an instance change) become one "N left at once" entry; and the **My account** option adds you to the list, because ArcDPS never reports your own account. Offline members never appear through live events.
 
 ## Install
 1. Get `squad_watch.dll` from the GitHub Actions run (Artifacts) or a tagged Release.
@@ -25,7 +25,7 @@ Local: `cmake -S . -B build -A x64 && cmake --build build --config Release`.
 
 ## What has and has not been verified
 Verified (Linux, native):
-- 152 unit checks of the core (paste parsing, clipboard formatting, roster update/remove, roles, watchlist).
+- 212 unit checks of the core (paste parsing, clipboard formatting, roster update/remove, roles, watchlist).
 - Name matching agrees with the composer's JavaScript on 9,508 names (all real names in your watchlist plus fuzzed edge cases), and standing / visible tags / derived text agree on every watchlist entry.
 - The Nexus/ImGui glue compiles (syntax-checked) against the real `Nexus.h` v6 and ImGui 1.80 with a stub `windows.h`.
 

@@ -6,6 +6,7 @@
 #include "role_icons.hpp"
 #include "../core/exchange.hpp"
 #include "../core/history.hpp"
+#include "../core/leaves.hpp"
 #include "../core/match.hpp"
 #include "../core/roles.hpp"
 #include "../core/roster.hpp"
@@ -14,7 +15,9 @@
 #include "../core/watchlist.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -54,6 +57,10 @@ ChangeLog gLog;                        // last 10 updates (who joined, which rol
 std::vector<SnapMember> gSnap;         // roster + roles as of the last role assignment / update
 bool gSnapValid = false;
 bool gUseLive = false;                 // ArcDPS live squad events (off: the clipboard list is the truth)
+LeaveTracker gLeaves;                  // live leaves waiting out the grace period (not saved)
+int gGraceSeconds = 15;                // how long a live leaver must stay away before the Changes tab reports it
+std::string gMyAccount;                // "Name.1234": your own account, which ArcDPS live events never report
+bool gSelfLeft = false;                // you left the squad (self leave event): do not re-add yourself until someone joins again
 CopyOptions gCopy;
 bool gVisible = false;
 bool gShowTags = true, gShowNotes = true;
@@ -137,7 +144,7 @@ void saveConfig() {
   nlohmann::json j;
   j["colonPrefix"] = gCopy.colonPrefix; j["includeCharacter"] = gCopy.includeCharacter; j["includeSubgroup"] = gCopy.includeSubgroup;
   j["sortBySubgroup"] = gCopy.sortBySubgroup; j["colSep"] = gCopy.colSep; j["rowSep"] = gCopy.rowSep;
-  j["useLive"] = gUseLive; j["need"] = gNeed; j["showTags"] = gShowTags; j["showNotes"] = gShowNotes; j["maxTags"] = gMaxTags; j["visible"] = gVisible; j["colW"] = std::vector<float>(gColW, gColW + 4); j["win"] = std::vector<float>(gWin, gWin + 4);
+  j["useLive"] = gUseLive; j["graceSeconds"] = gGraceSeconds; j["myAccount"] = gMyAccount; j["need"] = gNeed; j["showTags"] = gShowTags; j["showNotes"] = gShowNotes; j["maxTags"] = gMaxTags; j["visible"] = gVisible; j["colW"] = std::vector<float>(gColW, gColW + 4); j["win"] = std::vector<float>(gWin, gWin + 4);
   writeFile(P("config.json"), j.dump(2));
 }
 void loadConfig() {
@@ -149,13 +156,14 @@ void loadConfig() {
     auto s = [&](const char* k, std::string& v) { if (j.contains(k) && j[k].is_string()) v = j[k].get<std::string>(); };
     b("colonPrefix", gCopy.colonPrefix); b("includeCharacter", gCopy.includeCharacter); b("includeSubgroup", gCopy.includeSubgroup);
     b("sortBySubgroup", gCopy.sortBySubgroup); s("colSep", gCopy.colSep); s("rowSep", gCopy.rowSep);
-    b("useLive", gUseLive); b("showTags", gShowTags); b("showNotes", gShowNotes); b("visible", gVisible);
+    b("useLive", gUseLive); s("myAccount", gMyAccount); b("showTags", gShowTags); b("showNotes", gShowNotes); b("visible", gVisible);
     if (j.contains("need") && j["need"].is_object())
       for (auto it = j["need"].begin(); it != j["need"].end(); ++it) if (it.value().is_number_integer()) gNeed[it.key()] = std::max(0, std::min(50, it.value().get<int>()));
     if (j.contains("win") && j["win"].is_array() && j["win"].size() == 4)
       for (int i = 0; i < 4; ++i) if (j["win"][i].is_number()) gWin[i] = j["win"][i].get<float>();
     if (j.contains("colW") && j["colW"].is_array() && j["colW"].size() == 4)
       for (int i = 0; i < 4; ++i) if (j["colW"][i].is_number()) { float w = j["colW"][i].get<float>(); gColW[i] = (w >= 30.f && w <= 800.f) ? w : 0.f; }
+    if (j.contains("graceSeconds") && j["graceSeconds"].is_number_integer()) gGraceSeconds = std::min(120, std::max(0, j["graceSeconds"].get<int>()));
     if (j.contains("maxTags") && j["maxTags"].is_number_integer()) gMaxTags = std::min(6, std::max(0, j["maxTags"].get<int>()));
   } catch (...) { logI("config.json unreadable, using defaults"); }
 }
@@ -171,20 +179,6 @@ void loadWatchlist() {
 void loadAssignments() { bool ok; std::string t = readFile(P("assignments.json"), &ok); if (ok) gAssign.loadFromJson(t); }
 
 // ---- actions ----
-void drainEvents() {
-  std::deque<Event> local;
-  { std::lock_guard<std::mutex> lk(gMutex); local.swap(gEvents); }
-  if (!gUseLive) return;                       // events are ignored unless enabled in options
-  bool changed = false;
-  for (const auto& e : local) {
-    changed = true;
-    if (e.kind == Event::Join) gRoster.join(e.account, e.character, e.subgroup);
-    else if (e.self) gRoster.clearLive();
-    else gRoster.leave(e.account);
-  }
-  if (changed) saveSquad();
-}
-
 void doCopy() {
   if (gRoster.size() == 0) { gStatus = "Nothing to copy: squad list is empty"; alert(gStatus); return; }
   if (clipboardWrite(formatList(gRoster.members(), gCopy))) gStatus = "Copied " + std::to_string(gRoster.size()) + " members to the clipboard";
@@ -209,6 +203,7 @@ void restoreState(const AppState& st) {
   gRoster.loadFromJson(st.squad); gAssign.loadFromJson(st.assign);
   std::vector<SnapMember> snap; if (snapshotFromJson(st.snapshot, &snap)) gSnap = snap;
   gSnapValid = st.snapValid; gLog.loadFromJson(st.log);
+  gLeaves.clear();
   saveSquad(); saveAssignments(); saveSnapshot(); saveHistory();
 }
 void doUndo() {
@@ -225,6 +220,67 @@ std::string nowString() {
   char buf[16] = "";
   if (const std::tm* lt = std::localtime(&t)) std::strftime(buf, sizeof buf, "%H:%M", lt);
   return buf;
+}
+
+// ---- live (ArcDPS) squad events ----
+double nowSec() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+// "My account": ArcDPS live events never report you, so in live mode you are added to the roster from the option.
+void ensureSelf() {
+  if (!gUseLive || gSelfLeft || gMyAccount.empty()) return;
+  if (gRoster.addIfMissing(gMyAccount)) saveSquad();
+}
+
+// Leaves already reported by an update (or whose player is in the new roster) must not be reported again after the grace period.
+void reconcileLeaves(const std::vector<SnapMember>& reported) {
+  if (gLeaves.pending() == 0) return;
+  std::vector<std::string> keys;
+  for (const auto& s : reported) keys.push_back(s.m.key());
+  for (const auto& m : gRoster.members()) keys.push_back(m.key());
+  gLeaves.removeKeys(keys);
+}
+
+// Report the leaves whose grace period is over: one Changes entry per batch, one alert per batch (a mass leave is one line).
+void flushLeaves() {
+  if (gLeaves.pending() == 0) return;
+  for (const auto& b : gLeaves.flush(nowSec(), gRoster.size())) {
+    ChangeEntry e = entryFromLeaves(b, nowString());
+    gLog.push(e); saveHistory();
+    if (gSnapValid) {   // the baseline must not report these players again at the next update
+      gSnap.erase(std::remove_if(gSnap.begin(), gSnap.end(), [&](const SnapMember& s) {
+        for (const auto& l : b.left) if (l.m.key() == s.m.key()) return true;
+        return false; }), gSnap.end());
+      saveSnapshot();
+    }
+    std::string roles = leftRolesDisplay(e, gRoles);
+    gStatus = b.mass ? std::to_string(b.left.size()) + " left at once (instance change?)" + (roles.empty() ? "" : ": " + roles) : "Left: " + roles;
+    alert(gStatus.size() > 120 ? gStatus.substr(0, 117) + "..." : gStatus);
+  }
+}
+
+void drainEvents() {
+  std::deque<Event> local;
+  { std::lock_guard<std::mutex> lk(gMutex); local.swap(gEvents); }
+  if (!gUseLive) { gLeaves.clear(); return; }  // events are ignored unless enabled in options
+  gLeaves.settings.graceSeconds = gGraceSeconds;
+  const double now = nowSec();
+  bool changed = false;
+  for (const auto& e : local) {
+    changed = true;
+    if (e.kind == Event::Join) {
+      gSelfLeft = false;
+      Member k; k.account = stripAccountPrefix(e.account);
+      gLeaves.cancel(k.key());   // back (maybe on another character) within the grace period: nothing to report, the role is still theirs
+      gRoster.join(e.account, e.character, e.subgroup);
+    } else if (e.self) {
+      gRoster.clearLive(); gLeaves.clear(); gSelfLeft = true;
+    } else {
+      Member gone;
+      if (gRoster.leave(e.account, &gone)) gLeaves.leave({gone, gAssign.get(gone.account.empty() ? gone.character : gone.account)}, now);
+    }
+  }
+  if (changed) { ensureSelf(); saveSquad(); }
+  flushLeaves();
 }
 
 void copyText(const std::string& text, const std::string& what) {
@@ -247,14 +303,17 @@ void assignRole(const std::string& who, const std::string& code) {
 void doUpdate() {
   auto list = parsePaste(clipboardRead());
   if (list.empty()) { gStatus = "Clipboard has no recognisable names"; alert(gStatus); return; }
+  if (gUseLive) { list = withAccount(list, gMyAccount); gSelfLeft = false; }   // a paste may leave you out; live mode keeps you in
   gUndo.record(captureState(), "Update from clipboard");
   bool first = gRoster.size() == 0 && !gSnapValid;
   std::vector<SnapMember> before = gSnapValid ? gSnap : snapshotOfRoster();
+  std::vector<SnapMember> reported;
   gRoster.applyUpdate(list);
   if (first) {
     gStatus = "First list: " + std::to_string(gRoster.size()) + " members";
   } else {
     ChangeEntry e = diffForHistory(before, gRoster.members(), nowString());
+    reported = e.left;
     std::string left = leftRolesDisplay(e, gRoles);
     if (e.joined.empty() && e.left.empty()) gStatus = "Updated: no changes (" + std::to_string(gRoster.size()) + " members)";
     else {
@@ -262,6 +321,7 @@ void doUpdate() {
       gStatus = "Updated: +" + std::to_string(e.joined.size()) + " joined, -" + std::to_string(e.left.size()) + " left" + (left.empty() ? "" : " (" + left + ")");
     }
   }
+  reconcileLeaves(reported);
   gAssign.prune(gRoster.members());
   saveSquad(); saveAssignments(); refreshSnapshot();
   alert(gStatus);
@@ -281,10 +341,14 @@ void doPasteFromComposer() {
   bool hadSquad = gRoster.size() > 0;
   std::vector<SnapMember> before = gSnapValid ? gSnap : snapshotOfRoster();
   ExchangeReport rep = applyExchange(gRoster, gAssign, gRoles, in);
+  if (gUseLive) { gSelfLeft = false; ensureSelf(); }
+  std::vector<SnapMember> reported;
   if (hadSquad) {                       // like an update: report who joined / left (and which roles left)
     ChangeEntry e = diffForHistory(before, gRoster.members(), nowString());
+    reported = e.left;
     if (!e.joined.empty() || !e.left.empty()) { gLog.push(e); saveHistory(); }
   }
+  reconcileLeaves(reported);
   saveSquad(); saveAssignments(); refreshSnapshot();
   gStatus = describeExchange(rep);
   alert(gStatus.size() > 120 ? gStatus.substr(0, 117) + "..." : gStatus);
@@ -616,16 +680,23 @@ void drawRolesTab() {
 void drawChangesTab() {
   if (ImGui::Button("Clear change log")) { gLog.clear(); saveHistory(); gStatus = "Change log cleared"; }
   ImGui::SameLine(); ImGui::TextDisabled("Last %d updates. Click an entry to copy the roles that left.", (int)ChangeLog::kMax);
-  if (gLog.entries().empty()) { ImGui::TextDisabled("Nothing yet. Each Update from clipboard that adds or removes people is logged here."); return; }
+  if (gLog.entries().empty()) { ImGui::TextDisabled("Nothing yet. Each Update from clipboard that adds or removes people is logged here (and, in live mode, leaves that outlast the grace period)."); return; }
   int idx = 0;
   for (const auto& e : gLog.entries()) {
     ImGui::PushID(idx++);
     ImGui::BeginGroup();
     ImGui::Separator();
-    ImGui::Text("[%s]  +%d joined, -%d left", e.time.c_str(), (int)e.joined.size(), (int)e.left.size());
+    if (e.live && e.mass) ImGui::Text("[%s]  %d left at once (instance change?)", e.time.c_str(), (int)e.left.size());
+    else if (e.live) ImGui::Text("[%s]  live: -%d left", e.time.c_str(), (int)e.left.size());
+    else ImGui::Text("[%s]  +%d joined, -%d left", e.time.c_str(), (int)e.joined.size(), (int)e.left.size());
     std::string roles = leftRolesDisplay(e, gRoles);
     if (!roles.empty()) ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.40f, 1), "  Roles left: %s", roles.c_str());
-    for (const auto& l : e.left) {
+    if (e.mass) {   // one summary line instead of one line per player
+      std::string names; size_t shown = 0;
+      for (const auto& l : e.left) { if (shown++ >= 6) break; names += (names.empty() ? "" : ", ") + (l.m.account.empty() ? l.m.character : l.m.account); }
+      if (e.left.size() > 6) names += " +" + std::to_string(e.left.size() - 6) + " more";
+      ImGui::PushTextWrapPos(0.0f); ImGui::TextDisabled("  %s", names.c_str()); ImGui::PopTextWrapPos();
+    } else for (const auto& l : e.left) {
       const std::string& who = l.m.account.empty() ? l.m.character : l.m.account;
       Standing st = Watchlist::standing(gWatch.match(l.m.account, l.m.character));
       ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1), "  - left");
@@ -716,7 +787,16 @@ void renderOptions() {
   dirty |= ImGui::Checkbox("Show watchlist tags", &gShowTags);
   dirty |= ImGui::Checkbox("Show notes in tooltips", &gShowNotes);
   dirty |= ImGui::SliderInt("Tags shown per player", &gMaxTags, 0, 6);
-  dirty |= ImGui::Checkbox("Also follow ArcDPS live squad events (experimental)", &gUseLive);
+  if (ImGui::Checkbox("Also follow ArcDPS live squad events (experimental)", &gUseLive)) { dirty = true; gSelfLeft = false; ensureSelf(); }
+  ImGui::TextDisabled("Live mode only: a leave is reported in Changes after the grace period, and only if the player has not come back.");
+  dirty |= ImGui::SliderInt("Live leave grace period (seconds)", &gGraceSeconds, 0, 120);
+  {
+    char acc[64]; std::snprintf(acc, sizeof acc, "%s", gMyAccount.c_str());
+    if (ImGui::InputText("My account (live mode)", acc, sizeof acc)) { gMyAccount = acc; dirty = true; }
+    if (ImGui::IsItemDeactivatedAfterEdit()) { gSelfLeft = false; ensureSelf(); }
+    if (!gMyAccount.empty() && !looksLikeAccount(stripAccountPrefix(gMyAccount))) ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1), "Not a valid account name (expected Name.1234)");
+    else ImGui::TextDisabled("ArcDPS live events never include you; this account is added to the squad list in live mode (e.g. Name.1234).");
+  }
   ImGui::Separator();
   ImGui::TextDisabled("Watchlist: %s", gWatchStatus.c_str());
   ImGui::TextDisabled("Data folder: %s", gDir.u8string().c_str());
@@ -734,7 +814,7 @@ void AddonLoad(AddonAPI_t* api) {
   gDir = fs::u8path(dir ? dir : ".");
   std::error_code ec; fs::create_directories(gDir, ec);
 
-  loadConfig(); loadWatchlist(); loadAssignments(); loadSquad(); loadHistoryAndSnapshot();
+  loadConfig(); loadWatchlist(); loadAssignments(); loadSquad(); loadHistoryAndSnapshot(); ensureSelf();
 
   api->GUI_Register(RT_Render, renderWindow);
   api->GUI_Register(RT_OptionsRender, renderOptions);
@@ -772,7 +852,7 @@ void AddonUnload() {
 }
 
 AddonDefinition_t gDef = {
-  0x53515744, NEXUS_API_VERSION, kName, {0, 10, 0, 0}, "Squad Watch contributors",
+  0x53515744, NEXUS_API_VERSION, kName, {0, 11, 0, 0}, "Squad Watch contributors",
   "Squad list with watchlist markers, subgroups, role assignment and change report. Update the squad from the clipboard.",
   AddonLoad, AddonUnload, AF_None, UP_None, nullptr
 };

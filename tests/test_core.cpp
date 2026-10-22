@@ -1,5 +1,6 @@
 #include "../src/core/exchange.hpp"
 #include "../src/core/history.hpp"
+#include "../src/core/leaves.hpp"
 #include "../src/core/match.hpp"
 #include "../src/core/roles.hpp"
 #include "../src/core/undo.hpp"
@@ -302,8 +303,101 @@ void testLfg() {
   CHECK_EQ(lfgRolesText(b, 8), "dps");
 }
 
+
+static SnapMember sm(const char* account, const char* role = "") {
+  SnapMember s; s.m.account = account; s.role = role; return s;
+}
+static size_t countBatches(const std::vector<LeaveBatch>& v) { return v.size(); }
+
+void testLeaves() {
+  // Roster helpers
+  Roster r; r.join(":A.1111", "a", 2); r.join(":B.2222", "b", 0);
+  Member gone; CHECK(r.leave(":a.1111", &gone)); CHECK_EQ(gone.account, "A.1111"); CHECK(gone.subgroup == 2); CHECK(r.size() == 1);
+  CHECK(!r.leave(":A.1111")); CHECK(r.find("B.2222") != nullptr); CHECK(r.find(":b.2222") != nullptr); CHECK(r.find("A.1111") == nullptr);
+
+  // A single leave is held back until the grace period is over
+  LeaveTracker t;
+  CHECK(t.settings.graceSeconds == 15.0);
+  t.leave(sm("A.1111", "boondps__alac"), 100.0);
+  CHECK(countBatches(t.flush(110.0, 9)) == 0);
+  CHECK(t.pending() == 1);
+  auto b = t.flush(115.0, 9);
+  CHECK(b.size() == 1); CHECK(b.size() == 1 && b[0].left.size() == 1 && b[0].left[0].role == "boondps__alac" && !b[0].mass);
+  CHECK(t.pending() == 0); CHECK(t.flush(200.0, 9).empty());
+
+  // Coming back within the grace period cancels it silently (any case / colon prefix is normalised by Member::key)
+  t.leave(sm("A.1111"), 0.0); t.leave(sm("B.2222"), 1.0);
+  Member back; back.account = "a.1111";
+  CHECK(t.cancel(back.key())); CHECK(!t.cancel(back.key()));
+  auto b2 = t.flush(30.0, 9);
+  CHECK(b2.size() == 1 && b2[0].left.size() == 1 && b2[0].left[0].m.account == "B.2222");
+
+  // The same player leaving twice is one pending leave (the later time counts)
+  t = LeaveTracker(); t.leave(sm("A.1111"), 0.0); t.leave(sm("A.1111"), 10.0);
+  CHECK(t.pending() == 1); CHECK(t.flush(20.0, 9).empty()); CHECK(t.flush(25.0, 9).size() == 1);
+
+  // A whole squad changing instance: one batch, flagged mass, reported once the last leaver has been away for the grace period
+  t = LeaveTracker();
+  for (int i = 0; i < 8; ++i) { std::string a = "P" + std::to_string(i) + ".100" + std::to_string(i); t.leave(sm(a.c_str()), 50.0 + i * 0.3); }
+  CHECK(t.flush(60.0, 2).empty());                       // 8 pending, grace not over for the newest
+  auto b3 = t.flush(67.2, 2);
+  CHECK(b3.size() == 1 && b3[0].left.size() == 8 && b3[0].mass);
+  CHECK(t.pending() == 0);
+
+  // A few swapping characters: 2 of 10 is not a mass leave; 3 of a 6 squad is (a third); 4 of 20 is not
+  t = LeaveTracker(); t.leave(sm("A.1111"), 0); t.leave(sm("B.2222"), 1);
+  auto b4 = t.flush(20, 8); CHECK(b4.size() == 1 && b4[0].left.size() == 2 && !b4[0].mass);
+  t = LeaveTracker(); t.leave(sm("A.1111"), 0); t.leave(sm("B.2222"), 1); t.leave(sm("C.3333"), 2);
+  auto b5 = t.flush(30, 3); CHECK(b5.size() == 1 && b5[0].mass);
+  t = LeaveTracker(); for (int i = 0; i < 4; ++i) { std::string a = "Q.100" + std::to_string(i); t.leave(sm(a.c_str()), i); }
+  auto b6 = t.flush(30, 16); CHECK(b6.size() == 1 && b6[0].left.size() == 4 && !b6[0].mass);
+
+  // Two separate leaves far apart are separate batches
+  t = LeaveTracker(); t.leave(sm("A.1111"), 0); t.leave(sm("B.2222"), 30);
+  auto b7 = t.flush(31, 9); CHECK(b7.size() == 1 && b7[0].left[0].m.account == "A.1111");
+  auto b8 = t.flush(46, 9); CHECK(b8.size() == 1 && b8[0].left[0].m.account == "B.2222");
+
+  // A trickle of leaves (each within the burst gap of the last) is still reported after grace + burstMaxExtra
+  t = LeaveTracker();
+  for (int i = 0; i < 20; ++i) { std::string a = "T" + std::to_string(i) + ".200" + std::to_string(i % 10); if (i >= 10) a = "T" + std::to_string(i) + ".210" + std::to_string(i % 10); t.leave(sm(a.c_str()), i * 2.0); }
+  CHECK(t.flush(24.9, 5).empty());                      // oldest leave at 0, overdue only from 15 + 10
+  auto b9 = t.flush(25.0, 5); CHECK(b9.size() == 1 && b9[0].left.size() == 20 && b9[0].mass);
+
+  // Grace 0 reports on the next flush
+  t = LeaveTracker(); t.settings.graceSeconds = 0; t.leave(sm("A.1111"), 5.0);
+  CHECK(t.flush(5.0, 9).size() == 1);
+
+  // removeKeys: leaves already reported by an update (or whose player is back) are dropped without a report
+  t = LeaveTracker(); t.leave(sm("A.1111"), 0); t.leave(sm("B.2222"), 0.5); t.leave(sm("C.3333"), 1);
+  Member ka; ka.account = "A.1111"; Member kc; kc.account = "c.3333";
+  CHECK(t.removeKeys({ka.key(), kc.key()}) == 2); CHECK(t.pending() == 1);
+  auto b10 = t.flush(40, 9); CHECK(b10.size() == 1 && b10[0].left.size() == 1 && b10[0].left[0].m.account == "B.2222");
+  t.leave(sm("A.1111"), 0); t.clear(); CHECK(t.pending() == 0);
+
+  // Entry + persistence of the live/mass flags (older changes.json without them still loads)
+  LeaveBatch lb; lb.left = {sm("A.1111", "hk"), sm("B.2222")}; lb.mass = true;
+  ChangeEntry e = entryFromLeaves(lb, "21:05");
+  CHECK(e.live && e.mass && e.joined.empty() && e.left.size() == 2 && e.time == "21:05");
+  ChangeLog log; log.push(e); ChangeEntry plain; plain.time = "20:00"; log.push(plain);
+  ChangeLog back2; CHECK(back2.loadFromJson(log.toJson()));
+  CHECK(back2.entries().size() == 2 && back2.entries()[1].live && back2.entries()[1].mass && !back2.entries()[0].live && !back2.entries()[0].mass);
+  ChangeLog old; CHECK(old.loadFromJson("{\"version\":1,\"entries\":[{\"time\":\"1\",\"joined\":[],\"left\":[]}]}")); CHECK(!old.entries()[0].live && !old.entries()[0].mass);
+  RoleSet rs = RoleSet::defaults(); CHECK_EQ(leftRolesClipboard(e, rs), "1DPS, 1HK");
+
+  // My account: added when missing (valid accounts only), never duplicated, subgroup left unknown
+  Roster me; me.join(":X.1000", "x", 0);
+  CHECK(me.addIfMissing(":Self.4321")); CHECK(me.size() == 2); CHECK(me.find("self.4321") != nullptr && me.find("self.4321")->subgroup == -1);
+  CHECK(!me.addIfMissing("Self.4321")); CHECK(!me.addIfMissing("not an account")); CHECK(!me.addIfMissing("")); CHECK(me.size() == 2);
+  auto wl = withAccount(parsePaste("X.1000, x"), ":Self.4321");
+  CHECK(wl.size() == 2 && wl[1].account == "Self.4321");
+  CHECK(withAccount(wl, "self.4321").size() == 2); CHECK(withAccount(wl, "nonsense").size() == 2);
+  // an update whose paste leaves you out keeps you when you are added to the paste first
+  Roster up; up.join("Self.4321", "", -1); up.join("Y.2000", "y", 0);
+  up.applyUpdate(withAccount(parsePaste("Y.2000, y"), "Self.4321")); CHECK(up.find("Self.4321") != nullptr);
+}
+
 int main() {
-  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo(); testExchange(); testLfg();
+  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo(); testExchange(); testLfg(); testLeaves();
   std::printf("%d checks, %d failed\n", g_n, g_fail);
   return g_fail ? 1 : 0;
 }

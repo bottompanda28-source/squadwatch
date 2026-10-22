@@ -13,6 +13,8 @@ struct ChangeEntry {
   std::string time;                 // "HH:MM", informational
   std::vector<std::string> joined;  // display names
   std::vector<SnapMember> left;     // who left, with the role they held (empty role = unassigned)
+  bool live = false;                // came from ArcDPS live leaves (after the grace period), not from an update
+  bool mass = false;                // many players left at once (instance change): shown as one summary line
 };
 
 // before = snapshot (roster + roles as of the last role assignment / update), after = the new roster.

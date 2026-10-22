@@ -109,9 +109,24 @@ void Roster::join(const std::string& account, const std::string& character, int 
   if (subgroup >= 0) e.subgroup = subgroup;
 }
 
-void Roster::leave(const std::string& account) {
+bool Roster::leave(const std::string& account, Member* removed) {
   int i = indexOf(normKey(stripAccountPrefix(account)));
-  if (i >= 0) members_.erase(members_.begin() + i);
+  if (i < 0) return false;
+  if (removed) *removed = members_[i];
+  members_.erase(members_.begin() + i);
+  return true;
+}
+
+bool Roster::addIfMissing(const std::string& account) {
+  std::string a = stripAccountPrefix(account);
+  if (!looksLikeAccount(a) || find(a)) return false;
+  join(a, "", -1);
+  return true;
+}
+
+const Member* Roster::find(const std::string& account) const {
+  int i = indexOf(normKey(stripAccountPrefix(account)));
+  return i >= 0 ? &members_[i] : nullptr;
 }
 
 void Roster::clearLive() {
@@ -160,6 +175,15 @@ std::vector<Change> Roster::applyUpdate(const std::vector<Member>& pasted) {
   members_ = next;
   if (wasEmpty) return {};
   return diffSnapshot(before, members_);
+}
+
+std::vector<Member> withAccount(std::vector<Member> list, const std::string& account) {
+  std::string a = stripAccountPrefix(account);
+  if (!looksLikeAccount(a)) return list;
+  Member m; m.account = a;
+  for (const auto& x : list) if (x.key() == m.key()) return list;
+  list.push_back(m);
+  return list;
 }
 
 std::string Roster::toJson() const {

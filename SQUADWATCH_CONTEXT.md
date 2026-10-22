@@ -10,11 +10,25 @@ Three tools for running Guild Wars 2 raids, all single-purpose and personal:
 3. **Squad Watch** (this project): a standalone Nexus (Raidcore) in-game addon: a squad window with watchlist markers, subgroups, roles, change history. Needs no Unofficial Extras.
 
 ## Workflow the addon fits
-Squad Attendance (separate addon) copies the squad list to the clipboard -> press **Update from clipboard** in Squad Watch. The pasted list is the truth: an account missing from it has left; a character-name change is fine. Roles and subgroups are assigned by hand in the window.
+Squad Attendance (separate addon) copies the squad list to the clipboard -> press **Update from clipboard** in Squad Watch. The pasted list is the truth: an account missing from it has left; a character-name change is fine. Roles and subgroups are assigned by hand in the window. **This is the owner's real, preferred flow** (compare successive pastes across the roster). The ArcDPS live-events mode is only a fallback, kept robust but not the focus.
+
+## How Claude works on this repo (delivery)
+- Claude gets the repo (or the files it needs) and returns **only the changed/new files, in the same folder structure as the repo**, as file diffs / changed files, not a whole zipped source. The owner copies them over the repo folder, commits and pushes with GitHub Desktop, then takes the DLL from the Actions run. Claude should say which files changed and keep this file updated.
+- Native checks to run before delivering: `cmake -S . -B build && cmake --build build && build/test_core`, plus a syntax-only compile of `src/addon/addon.cpp` against the real `Nexus.h` and ImGui 1.80 (stub `windows.h` in `tests/stubs`).
+
+## Decisions about getting the in-game squad (Oct 2026)
+- **No dependency on Unofficial Extras** (the owner finds it less stable than Squad Attendance). Nexus relays Extras squad updates as `EV_UNOFFICIAL_EXTRAS_SQUAD_UPDATE`, which would have given account names (offline members probably included, unverified); rejected.
+- **How Squad Attendance Taker gets offline members:** it reads the game's own squad data through a private reverse-engineered library (`src-re`, GW2RE: `GetSquadMembersUUIDs`, `GetDetailedInfo`). Its public repo has no license and the RE part is private, so it is **not copied or reimplemented**; reading game memory is also against ArenaNet's third-party rules and breaks on game patches.
+- Considered and **passed on for now**: Squad Watch firing Squad Attendance's keybind (Nexus `InputBinds.Invoke`) so one click does "snapshot + update". Still the best option if a one-click update is wanted again. Other option: ask the Squad Attendance author for an event/shared resource or a license.
 
 ## Design choices (and why)
 - **Own window, not the game's squad panel.** Addons cannot draw on the native squad UI.
 - **Clipboard is the roster source.** ArcDPS live squad events (`EV_ARCDPS_SQUAD_JOIN/LEAVE`, replay on load) exist but are an opt-in option, off by default, so they cannot fight the pasted list.
+- **Live mode behaviour (confirmed in game, Oct 2026):** a live leave removes/hides the player even if they came from a paste; someone leaving the squad or the instance disappears from the list; if they rejoin (even on another character, same account) their **role is kept** (roles are stored per account); a player removed with X loses the role. ArcDPS only reports players it can see, so offline members never appear, and **your own account is never reported**.
+- **Live leave grace period (v0.11, `core/leaves.*`):** a live leave is not logged at once. It waits `graceSeconds` (default **15**, option slider 0-120, `config.json` `graceSeconds`); if the same account joins again in that time (any character) the leave is forgotten silently, otherwise it is logged in Changes as a `live` entry with the role the player held. Leaves less than 3 s apart form one burst and are logged together after the newest has been away for the grace period (at the latest grace + 10 s after the oldest). The roster itself still drops the player immediately; only the report is delayed.
+- **Mass leave (v0.11):** a burst of 5+ leavers, or 3+ that are at least a third of the squad, is logged as one entry flagged `mass`: "N left at once (instance change?)", the roles-left line, and up to 6 names (+N more) instead of one line per player. One alert per logged batch ("Left: ..." or "N left at once").
+- **No double reporting (v0.11):** when a live leave is logged it is also removed from the "who left" baseline so the next Update from clipboard does not report it again; a pending leave that an update/composer paste already reported (or whose player is back in the roster) is dropped. Undo clears pending leaves. Pending leaves are not saved across restarts.
+- **My account (v0.11, `config.json` `myAccount`, options page):** in live mode only, this account (`Name.1234`) is added to the roster after live events, at load, when the option is switched on or edited, after a composer paste, and is added to the pasted list before *Update from clipboard* so a paste that leaves you out does not report you as having left. Not re-added after a self-leave event until someone joins again. Removing yourself with X sticks until the next trigger. Off in clipboard mode (the paste already contains you).
 - **Identity = account name** (case-insensitive, leading `:` stripped). Character names are display/fallback only.
 - **Matching is a port of the composer's** `wlCandidateVariants` / `watchlistMatch` (decorated names, `a / b`, notes in brackets, character fallback, worst severity wins). Verified identical on 9,508 names.
 - **Standing colours the account name**: red blocked, yellow flagged, green trusted. No text labels in the Watchlist column; it shows tags only (role-relevant first, then pinned, max 3, "+N more"; a parent tag is hidden when its child is present).
@@ -44,11 +58,12 @@ Squad Attendance (separate addon) copies the squad list to the clipboard -> pres
 - `.github/workflows/build.yml`: builds on `windows-latest`, runs tests, uploads `squad_watch.dll`; tag `v*` makes a release.
 
 ## Verification status (update this honestly)
-- Native: 152 unit checks; matching, tag picking, derived text, name stripping all cross-checked against the composer's JS.
+- Native: 212 unit checks (v0.11); matching, tag picking, derived text, name stripping all cross-checked against the composer's JS.
 - Glue is only **syntax-checked** here (stub `windows.h`, real `Nexus.h` v6, ImGui 1.80). The Windows build runs in CI; behaviour is verified by playing. The user reported it working in game after v0.1; later changes (v0.2 onwards: undo, columns, subgroup copy) have not been confirmed.
 
 ## Known limits / open items
 - Event payload layout (`EvAgentUpdate`) is from Nexus docs; only matters if live events are enabled.
+- Live mode, v0.11: the grace period, mass-leave logging and My account are unit-tested (core) and syntax-checked (glue), **not yet played in game**. Not done on purpose: an "Open roles" line, role-gap alerts (only grace period, mass leave and My account were asked for).
 - Emoji/CJK names render only if Nexus's font has the glyphs.
 - Decima Kite has no icon (the composer has none). Role icons are 64px PNGs from the composer.
 - Lowercasing is per character, so a word-final capital sigma differs from JS (irrelevant for account names).
@@ -64,3 +79,4 @@ Squad Attendance (separate addon) copies the squad list to the clipboard -> pres
 - v0.8 Resizable, remembered Squad table columns; Nexus version string now matches the release.
 - v0.9 Performance level first in the Watchlist column; window position/size remembered.
 - v0.10 Roles tab: LFG Roles (clipboard LFG text from open roles, DPS fills to 10) and Zero all needs (7 new unit checks).
+- v0.11 Live mode robustness: grace period before live leaves are logged (default 15 s, adjustable), mass-leave entries, "My account" option; Changes entries flagged `live`/`mass` (`changes.json`, older files still load); `Roster::leave` returns the removed member, `Roster::find/addIfMissing`, `withAccount`. 60 new unit checks.

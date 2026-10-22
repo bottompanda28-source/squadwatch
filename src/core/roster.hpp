@@ -28,6 +28,8 @@ bool looksLikeAccount(const std::string& s);  // contains Name.1234
 bool looksLikeUuid(const std::string& s);
 
 std::vector<Member> parsePaste(const std::string& text);
+// The list plus `account` when it is a valid account missing from the list (for "My account": a paste may leave you out).
+std::vector<Member> withAccount(std::vector<Member> list, const std::string& account);
 std::string formatList(const std::vector<Member>& members, const CopyOptions& opt);
 
 struct Snapshot { std::vector<Member> members; std::string label; };
@@ -37,7 +39,9 @@ std::vector<Change> diffSnapshot(const Snapshot& before, const std::vector<Membe
 class Roster {
  public:
   void join(const std::string& account, const std::string& character, int subgroup);  // ArcDPS add/update
-  void leave(const std::string& account);
+  bool leave(const std::string& account, Member* removed = nullptr);  // true if someone was removed (returned in *removed)
+  bool addIfMissing(const std::string& account);                      // "My account": join as a live member unless already there (false if invalid / present)
+  const Member* find(const std::string& account) const;               // by account (or character name if no account), null if absent
   void clearLive();                                    // e.g. on squad disband
   void mergePaste(const std::vector<Member>& pasted);  // adds/updates, never removes
   void replaceWithPaste(const std::vector<Member>& pasted);
