@@ -396,8 +396,53 @@ void testLeaves() {
   up.applyUpdate(withAccount(parsePaste("Y.2000, y"), "Self.4321")); CHECK(up.find("Self.4321") != nullptr);
 }
 
+// Simplified subgroups: a player who is not tracked yet starts in the default subgroup (index 0), everyone else keeps theirs.
+void testDefaultSubgroup() {
+  Roster off;                                    // default: no default subgroup
+  CHECK(off.defaultSubgroup() == -1);
+  off.applyUpdate(parsePaste("A.1111, a")); CHECK(off.find("A.1111")->subgroup == -1);
+
+  Roster r; r.setDefaultSubgroup(0); CHECK(r.defaultSubgroup() == 0);
+  // first list: everybody is new
+  r.applyUpdate(parsePaste("A.1111, a\nB.2222, b\nC.3333, c"));
+  CHECK(r.find("A.1111")->subgroup == 0 && r.find("B.2222")->subgroup == 0 && r.find("C.3333")->subgroup == 0);
+  // later update: only the new player gets the default, a manual move survives, a leaver is gone
+  r.setSubgroup("B.2222", 2);
+  r.applyUpdate(parsePaste("A.1111, a\nB.2222, b\nD.4444, d"));
+  CHECK(r.find("B.2222")->subgroup == 2);                    // manual subgroup kept
+  CHECK(r.find("D.4444")->subgroup == 0);                    // new player -> subgroup 1
+  CHECK(r.find("C.3333") == nullptr && r.size() == 3);
+  // a player already tracked without a subgroup is not moved by an update
+  Roster legacy; legacy.applyUpdate(parsePaste("L.5555, l")); CHECK(legacy.find("L.5555")->subgroup == -1);
+  legacy.setDefaultSubgroup(0); legacy.applyUpdate(parsePaste("L.5555, l\nM.6666, m"));
+  CHECK(legacy.find("L.5555")->subgroup == -1 && legacy.find("M.6666")->subgroup == 0);
+  // a paste that already carries a subgroup keeps it
+  Roster carry; carry.setDefaultSubgroup(0);
+  std::vector<Member> in = parsePaste("P.7777, p\nQ.8888, q"); in[1].subgroup = 3;
+  carry.applyUpdate(in); CHECK(carry.find("P.7777")->subgroup == 0 && carry.find("Q.8888")->subgroup == 3);
+  // merge / replace paste (composer exchange path), live join and "My account"
+  Roster m; m.setDefaultSubgroup(0);
+  m.mergePaste(parsePaste("X.1000\nY.2000")); CHECK(m.find("X.1000")->subgroup == 0 && m.find("Y.2000")->subgroup == 0);
+  m.replaceWithPaste(parsePaste("Z.3000")); CHECK(m.size() == 1 && m.find("Z.3000")->subgroup == 0);
+  m.join("J.9000", "j", -1); CHECK(m.find("J.9000")->subgroup == 0);              // joined without a subgroup
+  m.join("K.9001", "k", 4); CHECK(m.find("K.9001")->subgroup == 4);               // ArcDPS reports its own subgroup: kept
+  m.join("J.9000", "j", -1); CHECK(m.find("J.9000")->subgroup == 0);              // a repeat join does not reset anything
+  m.setSubgroup("J.9000", 1); m.join("J.9000", "j2", -1); CHECK(m.find("J.9000")->subgroup == 1);
+  CHECK(m.addIfMissing("Self.4321") && m.find("Self.4321")->subgroup == 0);
+  // the default is not part of squad.json: a reloaded squad keeps exactly what was saved
+  Roster saved; saved.applyUpdate(parsePaste("S.1000")); Roster loaded; loaded.setDefaultSubgroup(0);
+  CHECK(loaded.loadFromJson(saved.toJson())); CHECK(loaded.find("S.1000")->subgroup == -1);
+  // composer exchange: players without a seat get the default, seated ones keep theirs
+  Roster er; er.setDefaultSubgroup(0); Assignments ea; RoleSet ers = RoleSet::defaults();
+  std::vector<ExchangeMember> xin(2); xin[0].account = "E.1111"; xin[0].subgroup = 3; xin[1].account = "F.2222";
+  applyExchange(er, ea, ers, xin);
+  CHECK(er.find("E.1111")->subgroup == 2 && er.find("F.2222")->subgroup == 0);
+  // the default can be switched back
+  er.setDefaultSubgroup(-5); CHECK(er.defaultSubgroup() == -1);
+}
+
 int main() {
-  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo(); testExchange(); testLfg(); testLeaves();
+  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo(); testExchange(); testLfg(); testLeaves(); testDefaultSubgroup();
   std::printf("%d checks, %d failed\n", g_n, g_fail);
   return g_fail ? 1 : 0;
 }

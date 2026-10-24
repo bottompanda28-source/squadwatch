@@ -102,7 +102,7 @@ void Roster::join(const std::string& account, const std::string& character, int 
   Member m; m.account = stripAccountPrefix(account); m.character = character; m.subgroup = subgroup; m.live = true;
   if (m.account.empty()) return;
   int i = indexOf(m.key());
-  if (i < 0) { members_.push_back(m); return; }
+  if (i < 0) { if (m.subgroup < 0) m.subgroup = defaultSub_; members_.push_back(m); return; }
   Member& e = members_[i];
   e.account = m.account; e.live = true;
   if (!character.empty()) e.character = character;   // keep the last known character when the update has none
@@ -136,7 +136,7 @@ void Roster::clearLive() {
 void Roster::mergePaste(const std::vector<Member>& pasted) {
   for (const auto& p : pasted) {
     int i = indexOf(p.key());
-    if (i < 0) { Member m = p; m.live = false; members_.push_back(m); continue; }
+    if (i < 0) { Member m = p; m.live = false; if (m.subgroup < 0) m.subgroup = defaultSub_; members_.push_back(m); continue; }
     Member& e = members_[i];
     if (!p.account.empty()) e.account = p.account;
     if (!p.character.empty()) e.character = p.character;
@@ -170,6 +170,7 @@ std::vector<Change> Roster::applyUpdate(const std::vector<Member>& pasted) {
     int i = indexOf(m.key());
     if (i >= 0 && m.subgroup < 0) m.subgroup = members_[i].subgroup;     // keep manual subgroup
     if (i >= 0 && m.character.empty()) m.character = members_[i].character;
+    if (i < 0 && m.subgroup < 0) m.subgroup = defaultSub_;               // not tracked before: default subgroup
     next.push_back(m);
   }
   members_ = next;

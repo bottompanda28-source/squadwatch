@@ -64,6 +64,7 @@ bool gSelfLeft = false;                // you left the squad (self leave event):
 CopyOptions gCopy;
 bool gVisible = false;
 bool gShowTags = true, gShowNotes = true;
+bool gSimpleSub = true;                // simplified subgroups: buttons 1 / 2 / 3, new players start in subgroup 1 (on by default)
 int gMaxTags = 3;
 std::string gStatus;
 int gCopySub = -2;                     // subgroup for "Copy by role": -2 all subs, -1 no subgroup, >=0 that subgroup
@@ -144,7 +145,7 @@ void saveConfig() {
   nlohmann::json j;
   j["colonPrefix"] = gCopy.colonPrefix; j["includeCharacter"] = gCopy.includeCharacter; j["includeSubgroup"] = gCopy.includeSubgroup;
   j["sortBySubgroup"] = gCopy.sortBySubgroup; j["colSep"] = gCopy.colSep; j["rowSep"] = gCopy.rowSep;
-  j["useLive"] = gUseLive; j["graceSeconds"] = gGraceSeconds; j["myAccount"] = gMyAccount; j["need"] = gNeed; j["showTags"] = gShowTags; j["showNotes"] = gShowNotes; j["maxTags"] = gMaxTags; j["visible"] = gVisible; j["colW"] = std::vector<float>(gColW, gColW + 4); j["win"] = std::vector<float>(gWin, gWin + 4);
+  j["useLive"] = gUseLive; j["graceSeconds"] = gGraceSeconds; j["myAccount"] = gMyAccount; j["need"] = gNeed; j["showTags"] = gShowTags; j["showNotes"] = gShowNotes; j["simpleSub"] = gSimpleSub; j["maxTags"] = gMaxTags; j["visible"] = gVisible; j["colW"] = std::vector<float>(gColW, gColW + 4); j["win"] = std::vector<float>(gWin, gWin + 4);
   writeFile(P("config.json"), j.dump(2));
 }
 void loadConfig() {
@@ -156,7 +157,7 @@ void loadConfig() {
     auto s = [&](const char* k, std::string& v) { if (j.contains(k) && j[k].is_string()) v = j[k].get<std::string>(); };
     b("colonPrefix", gCopy.colonPrefix); b("includeCharacter", gCopy.includeCharacter); b("includeSubgroup", gCopy.includeSubgroup);
     b("sortBySubgroup", gCopy.sortBySubgroup); s("colSep", gCopy.colSep); s("rowSep", gCopy.rowSep);
-    b("useLive", gUseLive); s("myAccount", gMyAccount); b("showTags", gShowTags); b("showNotes", gShowNotes); b("visible", gVisible);
+    b("useLive", gUseLive); s("myAccount", gMyAccount); b("showTags", gShowTags); b("showNotes", gShowNotes); b("simpleSub", gSimpleSub); b("visible", gVisible);
     if (j.contains("need") && j["need"].is_object())
       for (auto it = j["need"].begin(); it != j["need"].end(); ++it) if (it.value().is_number_integer()) gNeed[it.key()] = std::max(0, std::min(50, it.value().get<int>()));
     if (j.contains("win") && j["win"].is_array() && j["win"].size() == 4)
@@ -167,6 +168,9 @@ void loadConfig() {
     if (j.contains("maxTags") && j["maxTags"].is_number_integer()) gMaxTags = std::min(6, std::max(0, j["maxTags"].get<int>()));
   } catch (...) { logI("config.json unreadable, using defaults"); }
 }
+
+// Simplified subgroups: a player who is not tracked yet starts in subgroup 1 (index 0); otherwise they start without one.
+void applySubgroupMode() { gRoster.setDefaultSubgroup(gSimpleSub ? 0 : -1); }
 
 void loadWatchlist() {
   // The watchlist page saves its export as gw2-watchlist-data.json; an older name is still accepted.
@@ -363,14 +367,14 @@ void setSubgroup(const Member& m, int sg) {
   gRoster.setSubgroup(m.account.empty() ? m.character : m.account, sg);
   saveSquad();
 }
-void assignUnassignedDps() {
+void setUnassignedDps() {
   int n = 0;
   for (const auto& m : gRoster.members()) {
     const std::string& who = m.account.empty() ? m.character : m.account;
     if (gAssign.get(who).empty()) { gAssign.set(who, "dps"); ++n; }
   }
   saveAssignments(); refreshSnapshot();
-  gStatus = "Assigned DPS to " + std::to_string(n) + " players";
+  gStatus = "Set " + std::to_string(n) + " unassigned players as DPS";
 }
 
 void kbToggle(const char*, bool rel) { if (!rel) { gVisible = !gVisible; } }
@@ -499,16 +503,29 @@ void drawMemberRow(const Member& m, int idx) {
 
   // subgroup
   ImGui::TableNextColumn(); captureCol(2);
-  std::string sgLabel = m.subgroup >= 0 ? "Sub " + std::to_string(m.subgroup + 1) : std::string("Sub -");
-  if (ImGui::SmallButton((sgLabel + "##sg").c_str())) ImGui::OpenPopup("sgpick");
-  if (ImGui::BeginPopup("sgpick")) {
-    ImGui::TextDisabled("%s: subgroup", who.c_str());
-    for (int g = 0; g < 10; ++g) {
-      if (g % 5) ImGui::SameLine();
-      if (ImGui::Button(std::to_string(g + 1).c_str(), ImVec2(30, 0))) { setSubgroup(m, g); ImGui::CloseCurrentPopup(); }
+  if (gSimpleSub) {
+    // Simplified toggle: buttons 1 / 2 / 3, leaving out the subgroup the player is already in (so two buttons for someone in 1-3;
+    // all three for someone in no subgroup or in 4+). The group headers already show where everyone is.
+    bool firstBtn = true;
+    for (int g = 0; g < 3; ++g) {
+      if (m.subgroup == g) continue;
+      if (!firstBtn) ImGui::SameLine();
+      firstBtn = false;
+      if (ImGui::SmallButton((std::to_string(g + 1) + "##sg" + std::to_string(g)).c_str())) setSubgroup(m, g);
+      if (ImGui::IsItemHovered()) ImGui::SetTooltip("Move %s to subgroup %d", who.c_str(), g + 1);
     }
-    if (ImGui::Button("None", ImVec2(60, 0))) { setSubgroup(m, -1); ImGui::CloseCurrentPopup(); }
-    ImGui::EndPopup();
+  } else {
+    std::string sgLabel = m.subgroup >= 0 ? "Sub " + std::to_string(m.subgroup + 1) : std::string("Sub -");
+    if (ImGui::SmallButton((sgLabel + "##sg").c_str())) ImGui::OpenPopup("sgpick");
+    if (ImGui::BeginPopup("sgpick")) {
+      ImGui::TextDisabled("%s: subgroup", who.c_str());
+      for (int g = 0; g < 10; ++g) {
+        if (g % 5) ImGui::SameLine();
+        if (ImGui::Button(std::to_string(g + 1).c_str(), ImVec2(30, 0))) { setSubgroup(m, g); ImGui::CloseCurrentPopup(); }
+      }
+      if (ImGui::Button("None", ImVec2(60, 0))) { setSubgroup(m, -1); ImGui::CloseCurrentPopup(); }
+      ImGui::EndPopup();
+    }
   }
 
   // preferred role (a marker for the squad leader; it changes nothing else)
@@ -545,6 +562,8 @@ void drawSquadTab() {
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies the squad with subgroups and roles so the Raid Squad Composer can read it\n(Squad editor / Role tracking: 'Paste from Squad Watch').");
   ImGui::SameLine(); if (ImGui::Button("Paste from composer")) doPasteFromComposer();
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Replaces the squad list with the squad copied from the composer ('Copy for Squad Watch'),\nincluding its subgroups and roles. Undo steps this back.");
+  ImGui::SameLine(); if (ImGui::Button("Set unassigned as DPS")) setUnassignedDps();
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gives the DPS role to everyone in the squad who has no role yet");
   if (ImGui::Button("Copy squad")) { if (gRoster.size()) { doCopy(); } else gStatus = "Nothing to copy: squad list is empty"; }
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies the list to the clipboard using the format set in Nexus options");
   ImGui::SameLine(); ImGui::TextDisabled("Copy by role:");
@@ -592,7 +611,7 @@ void drawSquadTab() {
     }
     sRoleW = std::min(sRoleW, 175.f); sPrefW = std::min(sPrefW, 130.f);
   }
-  const float defW[4] = {190.f, sRoleW, 55.f, sPrefW};
+  const float defW[4] = {190.f, sRoleW, gSimpleSub ? 72.f : 55.f, sPrefW};   // simplified mode: room for three small buttons
   if (ImGui::BeginTable("squad", 6, kTableFlags | ImGuiTableFlags_Resizable)) {
     ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthFixed, gColW[0] > 0.f ? gColW[0] : defW[0]);
     ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, gColW[1] > 0.f ? gColW[1] : defW[1]);
@@ -665,7 +684,8 @@ void drawRolesTab() {
   int unassigned = 0; for (auto& m : gRoster.members()) if (gAssign.get(m.account.empty() ? m.character : m.account).empty()) ++unassigned;
   ImGui::Text("%d squad members without a role", unassigned);
   ImGui::SameLine();
-  if (ImGui::Button("Assign unassigned as DPS")) assignUnassignedDps();
+  if (ImGui::Button("Set unassigned as DPS")) setUnassignedDps();
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gives the DPS role to everyone in the squad who has no role yet");
   ImGui::SameLine();
   if (ImGui::Button("LFG Roles")) copyText(lfgRolesText(board, gRoster.size()), "LFG roles");
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies LFG text for the roles still open, e.g. \"1quickdps, dps\".\nDPS fills the squad up to 10 once the other open roles are counted.");
@@ -784,6 +804,8 @@ void renderOptions() {
   int row = gCopy.rowSep == "\n" ? 1 : 0;
   const char* rows[] = {"Windows (CRLF)", "Unix (LF)"};
   if (ImGui::Combo("Row separator", &row, rows, 2)) { gCopy.rowSep = row ? "\n" : "\r\n"; dirty = true; }
+  if (ImGui::Checkbox("Simplified subgroups (buttons 1 / 2 / 3, new players start in subgroup 1)", &gSimpleSub)) { applySubgroupMode(); dirty = true; }
+  ImGui::TextDisabled("Off: the Sub column opens a picker for subgroups 1-10 and new players start without a subgroup.");
   dirty |= ImGui::Checkbox("Show watchlist tags", &gShowTags);
   dirty |= ImGui::Checkbox("Show notes in tooltips", &gShowNotes);
   dirty |= ImGui::SliderInt("Tags shown per player", &gMaxTags, 0, 6);
@@ -814,7 +836,7 @@ void AddonLoad(AddonAPI_t* api) {
   gDir = fs::u8path(dir ? dir : ".");
   std::error_code ec; fs::create_directories(gDir, ec);
 
-  loadConfig(); loadWatchlist(); loadAssignments(); loadSquad(); loadHistoryAndSnapshot(); ensureSelf();
+  loadConfig(); applySubgroupMode(); loadWatchlist(); loadAssignments(); loadSquad(); loadHistoryAndSnapshot(); ensureSelf();
 
   api->GUI_Register(RT_Render, renderWindow);
   api->GUI_Register(RT_OptionsRender, renderOptions);
@@ -852,7 +874,7 @@ void AddonUnload() {
 }
 
 AddonDefinition_t gDef = {
-  0x53515744, NEXUS_API_VERSION, kName, {0, 11, 0, 0}, "Squad Watch contributors",
+  0x53515744, NEXUS_API_VERSION, kName, {0, 12, 0, 0}, "Squad Watch contributors",
   "Squad list with watchlist markers, subgroups, role assignment and change report. Update the squad from the clipboard.",
   AddonLoad, AddonUnload, AF_None, UP_None, nullptr
 };

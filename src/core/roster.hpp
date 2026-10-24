@@ -48,6 +48,10 @@ class Roster {
   void clear() { members_.clear(); }
   void remove(const std::string& account);             // by account (or character if no account)
   void setSubgroup(const std::string& account, int subgroup);
+  // Subgroup (0-based, -1 = none) given to a player who is not yet tracked and arrives without one (paste, composer, "My account").
+  // Players already in the roster and players that come with their own subgroup (ArcDPS) are never touched. Not saved in squad.json.
+  void setDefaultSubgroup(int subgroup) { defaultSub_ = subgroup < 0 ? -1 : subgroup; }
+  int defaultSubgroup() const { return defaultSub_; }
   // "Update from clipboard": the pasted list is the truth. Members whose account is absent have left;
   // character changes are allowed. Subgroups already assigned are kept. Returns what changed
   // (empty and no changes reported when the roster was empty before, i.e. first import).
@@ -60,6 +64,7 @@ class Roster {
  private:
   int indexOf(const std::string& key) const;
   std::vector<Member> members_;
+  int defaultSub_ = -1;
 };
 
 
