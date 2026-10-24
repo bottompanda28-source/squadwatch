@@ -108,7 +108,10 @@ ExchangeReport applyExchange(Roster& roster, Assignments& assign, const RoleSet&
       if (roles.find(e.prefer)) { assign.setPrefer(who, e.prefer); ++rep.preferSet; }
       else if (std::find(rep.unknownRoles.begin(), rep.unknownRoles.end(), e.prefer) == rep.unknownRoles.end()) rep.unknownRoles.push_back(e.prefer);
     }
-    if (e.tank && roles.classOf(assign.get(who)) == "heal") { assign.setTank(who, true); ++rep.tanks; }
+    if (e.tank) {
+      if (roles.classOf(assign.get(who)) == "heal") { assign.setTank(who, true); ++rep.tanks; }
+      else ++rep.tanksSkipped;          // the addon only holds a tank mark for healers
+    }
   }
   return rep;
 }
@@ -117,6 +120,8 @@ std::string describeExchange(const ExchangeReport& r) {
   std::string s = "Pasted from composer: squad replaced (" + std::to_string(r.replaced) + " -> " + std::to_string(r.total - r.duplicates) + " players); "
                 + std::to_string(r.seated) + " seated, " + std::to_string(r.roleSet) + " roles";
   if (r.preferSet) s += ", " + std::to_string(r.preferSet) + " prefers";
+  if (r.tanks) s += ", " + std::to_string(r.tanks) + " tank" + (r.tanks == 1 ? "" : "s");
+  if (r.tanksSkipped) s += "; " + std::to_string(r.tanksSkipped) + " tank mark" + (r.tanksSkipped == 1 ? "" : "s") + " skipped (here only healers can be the tank)";
   if (!r.unknownRoles.empty()) s += "; role not in this addon: " + joinNames(r.unknownRoles, 4);
   if (r.duplicates) s += "; " + std::to_string(r.duplicates) + " duplicate(s) skipped";
   return s;

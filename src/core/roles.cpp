@@ -27,7 +27,7 @@ RoleSet RoleSet::defaults() {
     {"mat_tank", "Mat Tank", "specialty", "dragon", "MatTank"},
     {"qtp_pylon_kiter", "Q2 Kite", "specialty", "1ka1qadim", "Q2kite"},
     {"ranged_dps", "Ranged DPS", "specialty", "bow_and_arrow", "RangedDPS"},
-    {"decima_kite", "Decima Kite", "specialty", "", "DecimaKite"},
+    {"decima_kite", "Decima Kite", "specialty", "decima", "DecimaKite"},
   };
   return s;
 }

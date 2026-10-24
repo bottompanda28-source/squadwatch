@@ -33,6 +33,7 @@ struct ExchangeReport {
   int roleSet = 0;                     // members that received a role
   int preferSet = 0;                   // members that received a preferred role
   int tanks = 0;                       // members marked as tank
+  int tanksSkipped = 0;                // tank marks ignored because the player's role here is not a healer
   std::vector<std::string> unknownRoles;   // role codes this addon does not have (the role was skipped)
 };
 

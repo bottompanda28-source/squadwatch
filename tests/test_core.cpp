@@ -122,7 +122,7 @@ static void testRoles() {
   RoleSet rs = RoleSet::defaults();
   CHECK(rs.roles().size() == 16);
   CHECK_EQ(rs.classOf("boonheal__quick"), "heal"); CHECK_EQ(rs.labelOf("kite"), "Q1 Kite"); CHECK_EQ(rs.labelOf("decima_kite"), "Decima Kite");
-  CHECK_EQ(rs.classOf("dps"), "dps"); CHECK_EQ(rs.find("dps")->icon, "crossed_swords"); CHECK(rs.find("nope") == nullptr);
+  CHECK_EQ(rs.classOf("dps"), "dps"); CHECK_EQ(rs.find("dps")->icon, "crossed_swords"); CHECK_EQ(rs.find("decima_kite")->icon, "decima"); CHECK(rs.find("nope") == nullptr);
   Assignments a; a.set(":Foo.1111", "dps"); a.set("bar.2222", "dps"); a.set("baz.3333", "dps"); a.set("Foo.1111", "boonheal__quick"); a.set("qux.4444", "dps"); a.set("qux.4444", "");
   CHECK_EQ(a.get("FOO.1111"), "boonheal__quick");
   std::vector<Member> present(2); present[0].account = "Foo.1111"; present[1].account = "Bar.2222";
@@ -274,7 +274,10 @@ static void testExchange() {
   Roster r2; Assignments a2; std::vector<ExchangeMember> t2;
   CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"P.1111\",\"r\":\"boonheal__quick\",\"s\":2,\"t\":1},{\"a\":\"Q.2222\",\"r\":\"dps\",\"s\":3,\"t\":1}]}", &t2, &err));
   rep = applyExchange(r2, a2, rs, t2);
-  CHECK(a2.isTank("P.1111") && !a2.isTank("Q.2222") && rep.tanks == 1);
+  CHECK(a2.isTank("P.1111") && !a2.isTank("Q.2222") && rep.tanks == 1 && rep.tanksSkipped == 1);
+  { std::string d = describeExchange(rep); CHECK(d.find("1 tank") != std::string::npos && d.find("1 tank mark skipped") != std::string::npos); }
+  { Roster rn; Assignments an; std::vector<ExchangeMember> tn; CHECK(parseExchange("{\"gw2squad\":1,\"members\":[{\"a\":\"N.1\",\"s\":1}]}", &tn, &err));
+    ExchangeReport rr = applyExchange(rn, an, rs, tn); CHECK(rr.tanks == 0 && rr.tanksSkipped == 0 && describeExchange(rr).find("tank") == std::string::npos); }
 
   // prefers: kept for a player who stays when the paste has none (a composer view without prefers), unknown codes reported
   Roster r4; Assignments a4; r4.mergePaste(parsePaste("P.1111\nQ.2222")); a4.setPrefer("P.1111", "hk"); a4.setPrefer("Q.2222", "hk");

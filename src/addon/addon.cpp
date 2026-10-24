@@ -874,7 +874,7 @@ void AddonUnload() {
 }
 
 AddonDefinition_t gDef = {
-  0x53515744, NEXUS_API_VERSION, kName, {0, 12, 0, 0}, "Squad Watch contributors",
+  0x53515744, NEXUS_API_VERSION, kName, {0, 13, 0, 0}, "Squad Watch contributors",
   "Squad list with watchlist markers, subgroups, role assignment and change report. Update the squad from the clipboard.",
   AddonLoad, AddonUnload, AF_None, UP_None, nullptr
 };
