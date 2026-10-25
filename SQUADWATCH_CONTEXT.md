@@ -32,7 +32,9 @@ Squad Attendance (separate addon) copies the squad list to the clipboard -> pres
 - **Identity = account name** (case-insensitive, leading `:` stripped). Character names are display/fallback only.
 - **Matching is a port of the composer's** `wlCandidateVariants` / `watchlistMatch` (decorated names, `a / b`, notes in brackets, character fallback, worst severity wins). Verified identical on 9,508 names.
 - **Standing colours the account name**: red blocked, yellow flagged, green trusted. No text labels in the Watchlist column; it shows tags only (role-relevant first, then pinned, max 3, "+N more"; a parent tag is hidden when its child is present).
-- **Roles are built in** (no roles file). Order: Quick Heal, Alac Heal, Quick DPS, Alac DPS, DPS, VG Condi DPS, HK, Pusher, G1, Kite G2, Q1 Kite, Lamp, Mat Tank, Q2 Kite, Ranged DPS, Decima Kite. Internal ids keep old names (e.g. `qtp_pylon_kiter` = Q2 Kite) so saved data survives renames.
+- **Roles are editable (v0.14).** Built-in list = `RoleSet::defaults()`; the Roles tab can add, edit (name, kind, short name, icon) and remove roles, saved whole as `roles.json` (absent = defaults; *Reset roles* deletes it). Because the whole list is saved, a role added to the built-ins in a later version only appears after *Reset roles*. Ids never change after creation (assignments, prefers, need counts and the composer exchange use them); a new role's id = the composer's `slugify(label)` (`RoleSet::slug`), numbered `_2`... if taken. `dps` can be renamed but not removed (it also means "no role" in the change log, LFG text and *Set unassigned as DPS*). Removing a role unassigns its holders (and their tank mark), clears prefers and the Need count, refreshes the "who left" baseline; it is not undoable. Kind changes away from heal clear the tank marks of that role's holders. Custom roles must also exist in the composer (same name) for the exchange: an unknown role code there is skipped and reported.
+- **Role icons from image files (v0.14):** icon id `file:<name>` = `<addon folder>\SquadWatch\icons\<name>`, loaded once per session through `Textures_GetOrCreateFromFile` (identifier `TEX_SQUADWATCH_ROLE_file:<name>`). The Edit popup lists built-in icons and the images in that folder; *Add image* takes a pasted path (quotes allowed), checks the extension (png/jpg/jpeg/bmp/tga/gif) and size (4 MB), and copies it into the folder under a plain ASCII name. There is no file-open dialog on purpose (a modal Windows dialog would freeze the game). Replacing an image under the same name shows the new one after a restart.
+- **Roles are built in** (no roles file) - *superseded by the editable roles above; this was the v0.2-v0.13 design.* Order: Quick Heal, Alac Heal, Quick DPS, Alac DPS, DPS, VG Condi DPS, HK, Pusher, G1, Kite G2, Q1 Kite, Lamp, Mat Tank, Q2 Kite, Ranged DPS, Decima Kite. Internal ids keep old names (e.g. `qtp_pylon_kiter` = Q2 Kite) so saved data survives renames.
 - **Need counter per role** (0 = no target) instead of fixed seat counts, because the required roles differ per run. OPEN shows only when need > 0.
 - **LFG Roles (v0.10, Roles tab):** copies e.g. `1quickdps, dps`: every role with open seats as `<missing><shortname lower case>` (`2alacheal`), then plain `dps` (never a quantity) when roster + open seats of the other roles is under 10, or the DPS role itself has open seats. Nothing open and squad >= 10 copies nothing. Logic: `lfgRolesText` in `core/roles.cpp`. **Zero all needs** button sets every role's Need to 0.
 - **Tank** is a toggle shown only on heal roles; it is a marker, nothing more. Cleared if the role stops being a heal. The composer has the tank toggle in both its views and sends `t:1` for it; *Paste from composer* keeps it only for players whose pasted role is a healer and says so in the status line ("N tanks", "N tank marks skipped"). *Copy for composer* sends `t:1` for every tank, and the composer turns the mark on in whichever view pastes it.
@@ -51,6 +53,7 @@ Squad Attendance (separate addon) copies the squad list to the clipboard -> pres
 - **Quick-access icon:** transparent white glyph; hotkeys are registered with `"(null)"` (= unbound) so the tooltip shows no `[(null)]`.
 
 ## Data (in `<GW2>\addons\SquadWatch\`)
+`roles.json` (only once roles were changed) and the `icons\` folder (role images added by the user), plus:
 `gw2-watchlist-data.json` (the watchlist's export; `watchlist.json` also accepted; reload with *Reload watchlist*), `squad.json`, `assignments.json` (roles + tanks), `snapshot.json`, `changes.json`, `config.json` (copy format, option toggles, need counts).
 
 ## Layout
@@ -60,7 +63,7 @@ Squad Attendance (separate addon) copies the squad list to the clipboard -> pres
 - `.github/workflows/build.yml`: builds on `windows-latest`, runs tests, uploads `squad_watch.dll`; tag `v*` makes a release.
 
 ## Verification status (update this honestly)
-- Native: 233 unit checks (v0.12); matching, tag picking, derived text, name stripping all cross-checked against the composer's JS.
+- Native: 281 unit checks (v0.14); matching, tag picking, derived text, name stripping all cross-checked against the composer's JS.
 - Glue is only **syntax-checked** here (stub `windows.h`, real `Nexus.h` v6, ImGui 1.80). The Windows build runs in CI; behaviour is verified by playing. The user reported it working in game after v0.1; later changes (v0.2 onwards: undo, columns, subgroup copy) have not been confirmed.
 
 ## Known limits / open items
@@ -81,6 +84,7 @@ Squad Attendance (separate addon) copies the squad list to the clipboard -> pres
 - v0.8 Resizable, remembered Squad table columns; Nexus version string now matches the release.
 - v0.9 Performance level first in the Watchlist column; window position/size remembered.
 - v0.10 Roles tab: LFG Roles (clipboard LFG text from open roles, DPS fills to 10) and Zero all needs (7 new unit checks).
+- v0.14 Roles tab: Add role, Edit (name / kind / short name / icon) and Remove per row, Reset roles, own image files as icons (`roles.json`, `icons\`); `RoleSet::add/update/remove/slug/uniqueCode/toJson/loadFromJson`, `Assignments::dropRole/dropMissingRoles`; 44 new unit checks (UI and image loading are syntax-checked only).
 - v0.13 Decima Kite icon (`decima`); composer paste reports how many tanks arrived and how many tank marks were skipped (a tank mark is only kept for healers here); 4 new unit checks.
 - v0.12 Simplified subgroups (1/2/3 buttons minus the current one, new players start in subgroup 1, on by default, option to switch off); "Set unassigned as DPS" (renamed, plus a Squad tab button). `Roster::setDefaultSubgroup`; 21 new unit checks.
 - v0.11 Live mode robustness: grace period before live leaves are logged (default 15 s, adjustable), mass-leave entries, "My account" option; Changes entries flagged `live`/`mass` (`changes.json`, older files still load); `Roster::leave` returns the removed member, `Roster::find/addIfMissing`, `withAccount`. 60 new unit checks.

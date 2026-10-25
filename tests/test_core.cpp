@@ -136,6 +136,45 @@ static void testRoles() {
   a.prune(present); CHECK(a.raw().size() == 2);
 }
 
+// Roles tab: add / edit / remove, the composer-compatible id, saving and the clean-up when a role disappears.
+static void testRoleEditing() {
+  CHECK_EQ(RoleSet::slug("Kite G2"), "kite_g2"); CHECK_EQ(RoleSet::slug("Q2 Kite (hard)"), "q2_kite"); CHECK_EQ(RoleSet::slug("  Mat-Tank!! "), "mat_tank");
+  CHECK_EQ(RoleSet::slug("!!!"), "role"); CHECK_EQ(RoleSet::slug("Quick Heal"), "quick_heal"); CHECK_EQ(RoleSet::slug("a (b) c (d"), "a_c_d");
+  CHECK_EQ(RoleSet::defaultShortName(" Boon Tank "), "BoonTank");
+  RoleSet rs = RoleSet::defaults();
+  for (const auto& r : rs.roles()) if (r.code != "boonheal__quick" && r.code != "boonheal__alac" && r.code != "boondps__quick" && r.code != "boondps__alac")
+    CHECK_EQ(RoleSet::slug(r.label), r.code == "kite" ? std::string("q1_kite") : r.code == "qtp_pylon_kiter" ? std::string("q2_kite") : r.code);   // built-in ids = what the composer derives (except the renamed ones)
+  std::string err;
+  RoleDef n; n.label = "  Sky Guard  "; n.roleClass = "specialty"; n.icon = "file:sky.png";
+  CHECK(rs.add(n, &err)); CHECK(rs.roles().size() == 17 && rs.roles().back().code == "sky_guard" && rs.roles().back().label == "Sky Guard" && rs.roles().back().shortName == "SkyGuard");
+  RoleDef again = n; again.label = "sky guard"; CHECK(!rs.add(again, &err) && !err.empty());          // same name, any case
+  RoleDef bad = n; bad.label = "Other"; bad.roleClass = "nonsense"; CHECK(!rs.add(bad, &err));
+  RoleDef empty = n; empty.label = "   "; CHECK(!rs.add(empty, &err));
+  RoleDef clash = n; clash.label = "Sky Guard (2)"; CHECK(rs.uniqueCode("Sky Guard (2)") == "sky_guard_2");   // the "(2)" is a note, so the id is taken: numbered
+  RoleDef fixed = n; fixed.label = "Fixed"; fixed.code = "dps"; CHECK(!rs.add(fixed, &err));
+  // edit: label / class / icon / short name change, the id stays
+  RoleDef e = *rs.find("sky_guard"); e.label = "Sky Warden"; e.roleClass = "heal"; e.icon = ""; e.shortName = "";
+  CHECK(rs.update("sky_guard", e, &err)); CHECK(rs.find("sky_guard") && rs.find("sky_warden") == nullptr);
+  CHECK_EQ(rs.labelOf("sky_guard"), "Sky Warden"); CHECK_EQ(rs.classOf("sky_guard"), "heal"); CHECK_EQ(rs.find("sky_guard")->shortName, "SkyWarden");
+  RoleDef dup = *rs.find("sky_guard"); dup.label = "decima kite"; CHECK(!rs.update("sky_guard", dup, &err));      // name of another role
+  RoleDef same = *rs.find("sky_guard"); CHECK(rs.update("sky_guard", same, &err));                                // keeping its own name is fine
+  CHECK(!rs.update("nope", same, &err));
+  CHECK(rs.add(n, &err) && rs.find("sky_guard_2") != nullptr);                                                    // a second role from the same slug is numbered
+  // remove: "dps" is protected
+  CHECK(!rs.remove("dps") && !rs.remove("nope") && rs.remove("sky_guard_2") && rs.find("sky_guard_2") == nullptr);
+  // save / load
+  RoleSet back = RoleSet::defaults(); CHECK(back.loadFromJson(rs.toJson(), &err));
+  CHECK(back.roles().size() == rs.roles().size() && back.labelOf("sky_guard") == "Sky Warden" && back.classOf("sky_guard") == "heal" && back.find("decima_kite")->icon == "decima");
+  RoleSet keep = RoleSet::defaults(); CHECK(!keep.loadFromJson("not json", &err) && keep.roles().size() == 16);
+  CHECK(!keep.loadFromJson("{\"roles\":[]}", &err) && keep.roles().size() == 16);
+  CHECK(keep.loadFromJson("{\"roles\":[{\"code\":\"x\",\"label\":\"X\",\"class\":\"weird\"},{\"code\":\"x\",\"label\":\"Again\"},{\"label\":\"no code\"}]}", &err));
+  CHECK(keep.roles().size() == 2 && keep.classOf("x") == "specialty" && keep.find("dps") != nullptr);          // bad class -> specialty, duplicate / codeless skipped, "dps" restored
+  // removing a role frees its players, their tank mark and prefers; need counts are the caller's business
+  Assignments a; a.set("A.1111", "sky_guard"); a.setTank("A.1111", true); a.set("B.2222", "dps"); a.setPrefer("B.2222", "sky_guard"); a.set("C.3333", "sky_guard");
+  CHECK(a.dropRole("sky_guard") == 2 && a.get("A.1111").empty() && !a.isTank("A.1111") && a.get("B.2222") == "dps" && a.getPrefer("B.2222").empty() && a.dropRole("sky_guard") == 0);
+  Assignments m; m.set("A.1111", "gone_a"); m.set("B.2222", "dps"); m.setPrefer("B.2222", "gone_b"); CHECK(m.dropMissingRoles(RoleSet::defaults()) == 1 && m.get("B.2222") == "dps" && m.getPrefer("B.2222").empty());
+}
+
 static void testUpdate() {
   Roster r;
   auto first = r.applyUpdate(parsePaste("A.1111, a\nB.2222, b\nC.3333, c"));
@@ -445,7 +484,7 @@ void testDefaultSubgroup() {
 }
 
 int main() {
-  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo(); testExchange(); testLfg(); testLeaves(); testDefaultSubgroup();
+  testText(); testParse(); testFormat(); testRoster(); testDiff(); testWatchlist(); testRoles(); testUpdate(); testNewFeatures(); testUndo(); testExchange(); testLfg(); testLeaves(); testDefaultSubgroup(); testRoleEditing();
   std::printf("%d checks, %d failed\n", g_n, g_fail);
   return g_fail ? 1 : 0;
 }

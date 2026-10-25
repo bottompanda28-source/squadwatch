@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -24,6 +25,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <ctime>
 
@@ -80,6 +82,7 @@ void captureCol(int c) { if (gColCapture && c >= 0 && c < 4) gColNow[c] = ImGui:
 fs::path gDir;
 
 fs::path P(const char* f) { return gDir / fs::u8path(f); }
+fs::path iconsDir() { return gDir / "icons"; }   // images the user added for roles (icon id "file:<name>")
 
 std::string readFile(const fs::path& p, bool* ok) {
   std::ifstream f(p, std::ios::binary);
@@ -130,6 +133,12 @@ std::string clipboardRead() {
 }
 
 // ---- persistence ----
+void saveRoles() { if (!writeFile(P("roles.json"), gRoles.toJson())) logI("could not write roles.json"); }
+void loadRoles() {   // no roles.json = the built-in roles
+  bool ok; std::string t = readFile(P("roles.json"), &ok);
+  if (!ok) return;
+  std::string err; if (!gRoles.loadFromJson(t, &err)) logI("roles.json unreadable, using the built-in roles: " + err);
+}
 void saveAssignments() { if (!writeFile(P("assignments.json"), gAssign.toJson())) logI("could not write assignments.json"); }
 
 void saveHistory() { writeFile(P("changes.json"), gLog.toJson()); }
@@ -416,9 +425,15 @@ const char* standingLabel(Standing s) {
 }
 
 // Role icons are registered as textures at load; fetch each frame (the texture may finish loading later).
+std::set<std::string> gIconTried;   // image-file icons already handed to Nexus this session
 bool drawRoleIcon(const std::string& icon, float size) {
   if (icon.empty() || !gApi) return false;
-  Texture_t* t = gApi->Textures_Get(("TEX_SQUADWATCH_ROLE_" + icon).c_str());
+  const std::string texId = "TEX_SQUADWATCH_ROLE_" + icon;
+  if (icon.rfind("file:", 0) == 0 && gIconTried.insert(icon).second) {   // an image the user added: loaded once, from <addon folder>\icons
+    const std::string path = (iconsDir() / fs::u8path(icon.substr(5))).string();
+    gApi->Textures_GetOrCreateFromFile(texId.c_str(), path.c_str());
+  }
+  Texture_t* t = gApi->Textures_Get(texId.c_str());
   if (!t || !t->Resource) return false;
   ImGui::Image((ImTextureID)t->Resource, ImVec2(size, size));
   return true;
@@ -644,14 +659,182 @@ void drawSquadTab() {
   popTableBorderColors();
 }
 
+// ---- role editor (Roles tab): add / edit / remove roles, saved in roles.json ----
+struct RoleEditor {
+  bool open = false;                  // ask the popup to open on the next frame
+  bool isNew = false;
+  std::string code;                   // the role being edited (its id never changes)
+  char label[64] = "";
+  char shortName[32] = "";
+  char path[600] = "";                // image file to add
+  int cls = 3;
+  std::string icon;
+  bool confirmRemove = false;
+  std::string msg;                    // last error
+  std::vector<std::string> files;     // images found in the icons folder
+} gRE;
+bool gResetRolesArmed = false;
+const char* const kClassIds[4] = {"heal", "boondps", "dps", "specialty"};
+const char* const kClassNames[4] = {"Healer", "Boon DPS", "DPS", "Specialty"};
+
+bool imageExt(const fs::path& p) {
+  std::string e = p.extension().string();
+  for (auto& c : e) c = (char)std::tolower((unsigned char)c);
+  return e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".bmp" || e == ".tga" || e == ".gif";
+}
+void scanIcons() {
+  gRE.files.clear();
+  std::error_code ec;
+  for (fs::directory_iterator it(iconsDir(), ec), end; !ec && it != end; it.increment(ec)) {
+    std::error_code e2;
+    if (it->is_regular_file(e2) && imageExt(it->path())) gRE.files.push_back(it->path().filename().u8string());
+  }
+  std::sort(gRE.files.begin(), gRE.files.end());
+}
+// Copies the image the user points at into <addon folder>\icons and returns its icon id ("file:<name>"); "" and *err on failure.
+std::string addImageFile(std::string raw, std::string* err) {
+  while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t' || raw.back() == '"' || raw.back() == '\r' || raw.back() == '\n')) raw.pop_back();
+  size_t b = 0; while (b < raw.size() && (raw[b] == ' ' || raw[b] == '\t' || raw[b] == '"')) ++b;   // Explorer's "Copy as path" adds quotes
+  raw = raw.substr(b);
+  if (raw.empty()) { *err = "Paste the path of an image file first."; return ""; }
+  std::error_code ec;
+  const fs::path src = fs::u8path(raw);
+  if (!fs::is_regular_file(src, ec)) { *err = "There is no file at that path."; return ""; }
+  if (!imageExt(src)) { *err = "Use a .png, .jpg, .bmp, .tga or .gif file."; return ""; }
+  const auto size = fs::file_size(src, ec);
+  if (ec || size > 4u * 1024u * 1024u) { *err = "The image is bigger than 4 MB."; return ""; }
+  fs::create_directories(iconsDir(), ec);
+  std::string name = src.filename().u8string();
+  for (auto& c : name) if (!(std::isalnum((unsigned char)c) || c == '.' || c == '_' || c == '-')) c = '_';   // plain names load reliably
+  fs::path dst = iconsDir() / fs::u8path(name);
+  const bool already = fs::exists(dst, ec) && fs::equivalent(src, dst, ec);   // picked from the icons folder itself
+  if (!already) {
+    const std::string stem = dst.stem().u8string(), ext = dst.extension().u8string();
+    for (int n = 2; fs::exists(dst, ec); ++n) dst = iconsDir() / fs::u8path(stem + "_" + std::to_string(n) + ext);
+    fs::copy_file(src, dst, fs::copy_options::none, ec);
+    if (ec) { *err = "Could not copy the image into the icons folder."; return ""; }
+  }
+  return "file:" + dst.filename().u8string();
+}
+
+void openRoleEditor(const RoleDef* r) {
+  gRE.open = true; gRE.isNew = (r == nullptr); gRE.confirmRemove = false; gRE.msg.clear(); gRE.path[0] = 0;
+  gRE.code = r ? r->code : std::string();
+  std::snprintf(gRE.label, sizeof gRE.label, "%s", r ? r->label.c_str() : "");
+  std::snprintf(gRE.shortName, sizeof gRE.shortName, "%s", r ? r->shortName.c_str() : "");
+  gRE.cls = 3;
+  if (r) for (int i = 0; i < 4; ++i) if (r->roleClass == kClassIds[i]) gRE.cls = i;
+  gRE.icon = r ? r->icon : std::string();
+  scanIcons();
+}
+bool saveRoleFromEditor() {
+  RoleDef d; d.label = gRE.label; d.shortName = gRE.shortName; d.roleClass = kClassIds[gRE.cls]; d.icon = gRE.icon;
+  std::string err;
+  if (gRE.isNew) {
+    if (!gRoles.add(d, &err)) { gRE.msg = err; return false; }
+    gStatus = "Added role " + trimJs(d.label);
+  } else {
+    if (!gRoles.update(gRE.code, d, &err)) { gRE.msg = err; return false; }
+    if (d.roleClass != "heal")   // a tank mark needs a healer role
+      for (const auto& m : gRoster.members()) { const std::string& who = m.account.empty() ? m.character : m.account; if (gAssign.get(who) == gRE.code) gAssign.setTank(who, false); }
+    gStatus = "Saved role " + trimJs(d.label);
+  }
+  saveRoles(); saveAssignments();
+  return true;
+}
+void removeRole(const std::string& code) {
+  if (RoleSet::isProtected(code) || !gRoles.find(code)) return;
+  const std::string label = gRoles.labelOf(code);
+  const int n = gAssign.dropRole(code);
+  gRoles.remove(code);
+  gNeed.erase(code);
+  saveRoles(); saveAssignments(); saveConfig(); refreshSnapshot();
+  gStatus = "Removed role " + label + (n ? " (" + std::to_string(n) + " player" + (n == 1 ? " is" : "s are") + " unassigned now)" : "");
+}
+void resetRoles() {
+  gRoles = RoleSet::defaults();
+  std::error_code ec; fs::remove(P("roles.json"), ec);
+  const int n = gAssign.dropMissingRoles(gRoles);
+  for (auto it = gNeed.begin(); it != gNeed.end();) it = gRoles.find(it->first) ? std::next(it) : gNeed.erase(it);
+  saveAssignments(); saveConfig(); refreshSnapshot();
+  gStatus = "Roles reset to the built-in list" + (n ? " (" + std::to_string(n) + " player" + (n == 1 ? " lost" : "s lost") + " a custom role)" : std::string());
+}
+
+void drawRoleEditorPopup() {
+  if (gRE.open) { ImGui::OpenPopup("Edit role##roleedit"); gRE.open = false; }
+  bool keep = true;
+  if (!ImGui::BeginPopupModal("Edit role##roleedit", &keep, ImGuiWindowFlags_AlwaysAutoResize)) return;
+  ImGui::TextDisabled("%s", gRE.isNew ? "New role" : "Edit role");
+  ImGui::SetNextItemWidth(260); ImGui::InputText("Name", gRE.label, sizeof gRE.label);
+  if (gRE.isNew) ImGui::TextDisabled("Id: %s  (the composer makes the same id from this name, which is what the copy / paste between them uses)", gRoles.uniqueCode(gRE.label).c_str());
+  else ImGui::TextDisabled("Id: %s  (never changes, so assigned players keep the role)", gRE.code.c_str());
+  ImGui::SetNextItemWidth(160);
+  if (ImGui::BeginCombo("Kind", kClassNames[gRE.cls])) {
+    for (int i = 0; i < 4; ++i) if (ImGui::Selectable(kClassNames[i], gRE.cls == i)) gRE.cls = i;
+    ImGui::EndCombo();
+  }
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Healer: can be marked as tank.\nThe kind also picks the Copy by role group (DPS / Healers / BoonDPS / Specialty)\nand which watchlist tags are shown first.");
+  ImGui::SetNextItemWidth(160); ImGui::InputText("Short name", gRE.shortName, sizeof gRE.shortName);
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Used in the LFG text and the 'roles left' text, no spaces.\nEmpty = the name without spaces.");
+
+  ImGui::Separator();
+  ImGui::Text("Icon:"); ImGui::SameLine();
+  if (drawRoleIcon(gRE.icon, 24.f)) ImGui::SameLine();
+  ImGui::SetNextItemWidth(230);
+  const std::string cur = gRE.icon.empty() ? std::string("(none)") : (gRE.icon.rfind("file:", 0) == 0 ? gRE.icon.substr(5) : gRE.icon);
+  if (ImGui::BeginCombo("##iconpick", cur.c_str())) {
+    if (ImGui::Selectable("(none)", gRE.icon.empty())) gRE.icon.clear();
+    ImGui::TextDisabled("Built in");
+    for (const auto& ic : kRoleIcons) {
+      if (drawRoleIcon(ic.id, 18.f)) ImGui::SameLine();
+      if (ImGui::Selectable(ic.id, gRE.icon == ic.id)) gRE.icon = ic.id;
+    }
+    if (!gRE.files.empty()) ImGui::TextDisabled("Your images");
+    for (const auto& f : gRE.files) {
+      const std::string id = "file:" + f;
+      if (drawRoleIcon(id, 18.f)) ImGui::SameLine();
+      if (ImGui::Selectable(f.c_str(), gRE.icon == id)) gRE.icon = id;
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::SetNextItemWidth(380); ImGui::InputTextWithHint("##imgpath", "Path of an image file to add (png / jpg)", gRE.path, sizeof gRE.path);
+  ImGui::SameLine();
+  if (ImGui::Button("Add image")) {
+    std::string err; const std::string id = addImageFile(gRE.path, &err);
+    if (id.empty()) gRE.msg = err; else { gRE.icon = id; gRE.path[0] = 0; gRE.msg.clear(); scanIcons(); }
+  }
+  ImGui::TextDisabled("In Explorer: Shift + right-click the image > Copy as path, then paste it here. It is copied to");
+  ImGui::TextDisabled("%s", iconsDir().u8string().c_str());
+  ImGui::TextDisabled("Images you put in that folder yourself show up in the icon list. PNG is the safe choice.");
+  if (!gRE.msg.empty()) ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1), "%s", gRE.msg.c_str());
+
+  ImGui::Separator();
+  if (ImGui::Button("Save")) { if (saveRoleFromEditor()) ImGui::CloseCurrentPopup(); }
+  ImGui::SameLine(); if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+  if (!gRE.isNew) {
+    ImGui::SameLine(0, 40);
+    if (RoleSet::isProtected(gRE.code)) ImGui::TextDisabled("This role cannot be removed (it also means 'no role').");
+    else if (!gRE.confirmRemove) { if (ImGui::Button("Remove role")) gRE.confirmRemove = true; }
+    else {
+      int holders = 0;
+      for (const auto& m : gRoster.members()) if (gAssign.get(m.account.empty() ? m.character : m.account) == gRE.code) ++holders;
+      ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.40f, 1), "Remove it? %d player%s become unassigned. No undo.", holders, holders == 1 ? "" : "s");
+      ImGui::SameLine(); if (ImGui::Button("Yes, remove")) { removeRole(gRE.code); ImGui::CloseCurrentPopup(); }
+      ImGui::SameLine(); if (ImGui::Button("Keep")) gRE.confirmRemove = false;
+    }
+  }
+  ImGui::EndPopup();
+}
+
 void drawRolesTab() {
   auto board = buildBoard(gRoles, gAssign, gRoster.members(), gNeed);
   pushTableBorderColors();
-  if (ImGui::BeginTable("board", 4, kTableFlags)) {
+  if (ImGui::BeginTable("board", 5, kTableFlags)) {
     ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthStretch, 1.4f);
     ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthStretch, 3.f);
     ImGui::TableSetupColumn("Need", ImGuiTableColumnFlags_WidthFixed, 80.f);
     ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 80.f);
+    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize, 44.f);
     ImGui::TableHeadersRow();
     for (const auto& r : board) {
       ImGui::PushID(r.role.code.c_str());
@@ -676,6 +859,9 @@ void drawRolesTab() {
       else if (r.open > 0) ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1), "%d/%d OPEN", have, r.need);
       else if (r.over > 0) ImGui::TextColored(ImVec4(0.6f, 0.8f, 1, 1), "%d/%d +%d", have, r.need, r.over);
       else ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.5f, 1), "%d/%d ok", have, r.need);
+      ImGui::TableNextColumn();
+      if (ImGui::SmallButton("Edit")) openRoleEditor(&r.role);
+      if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rename this role, change its kind or icon, or remove it");
       ImGui::PopID();
     }
     ImGui::EndTable();
@@ -694,7 +880,20 @@ void drawRolesTab() {
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sets the Need of every role to 0 (no target)");
   ImGui::SameLine();
   if (ImGui::Button("Clear all roles")) { gUndo.record(captureState(), "Clear all roles"); gAssign.clear(); saveAssignments(); refreshSnapshot(); }
+  ImGui::SameLine();
+  if (ImGui::Button("Add role")) openRoleEditor(nullptr);
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create your own role (name, kind, icon). Use the Edit button on a row to change or remove one.");
+  ImGui::SameLine();
+  if (!gResetRolesArmed) {
+    if (ImGui::Button("Reset roles")) gResetRolesArmed = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back to the built-in roles (your added / edited / removed roles are dropped)");
+  } else {
+    ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.40f, 1), "Back to the built-in roles?");
+    ImGui::SameLine(); if (ImGui::Button("Yes, reset")) { resetRoles(); gResetRolesArmed = false; }
+    ImGui::SameLine(); if (ImGui::Button("Cancel##resetroles")) gResetRolesArmed = false;
+  }
   ImGui::TextDisabled("Need = how many seats you want filled; 0 means no target. Click a role row to copy its players.");
+  drawRoleEditorPopup();
 }
 
 void drawChangesTab() {
@@ -836,7 +1035,7 @@ void AddonLoad(AddonAPI_t* api) {
   gDir = fs::u8path(dir ? dir : ".");
   std::error_code ec; fs::create_directories(gDir, ec);
 
-  loadConfig(); applySubgroupMode(); loadWatchlist(); loadAssignments(); loadSquad(); loadHistoryAndSnapshot(); ensureSelf();
+  loadConfig(); applySubgroupMode(); loadRoles(); loadWatchlist(); loadAssignments(); loadSquad(); loadHistoryAndSnapshot(); ensureSelf();
 
   api->GUI_Register(RT_Render, renderWindow);
   api->GUI_Register(RT_OptionsRender, renderOptions);
@@ -874,7 +1073,7 @@ void AddonUnload() {
 }
 
 AddonDefinition_t gDef = {
-  0x53515744, NEXUS_API_VERSION, kName, {0, 13, 0, 0}, "Squad Watch contributors",
+  0x53515744, NEXUS_API_VERSION, kName, {0, 14, 0, 0}, "Squad Watch contributors",
   "Squad list with watchlist markers, subgroups, role assignment and change report. Update the squad from the clipboard.",
   AddonLoad, AddonUnload, AF_None, UP_None, nullptr
 };

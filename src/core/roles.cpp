@@ -32,6 +32,97 @@ RoleSet RoleSet::defaults() {
   return s;
 }
 
+std::string RoleSet::slug(const std::string& label) {
+  // mirrors the composer's slugify(): lower case, drop \(...\) (non-greedy), runs of anything but a-z0-9 become "_", trim "_"
+  std::string s;
+  for (unsigned char c : label) s += (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
+  std::string t;
+  for (size_t i = 0; i < s.size();) {
+    if (s[i] == '(') { size_t j = s.find(')', i + 1); if (j != std::string::npos) { i = j + 1; continue; } }
+    t += s[i++];
+  }
+  std::string out; bool sep = false;
+  for (unsigned char c : t) {
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) { if (sep && !out.empty()) out += '_'; sep = false; out += (char)c; }
+    else sep = true;
+  }
+  return out.empty() ? "role" : out;
+}
+std::string RoleSet::defaultShortName(const std::string& label) {
+  std::string out;
+  for (char c : trimJs(label)) if (c != ' ' && c != '\t') out += c;
+  return out;
+}
+bool RoleSet::validClass(const std::string& c) { return c == "heal" || c == "boondps" || c == "dps" || c == "specialty"; }
+std::string RoleSet::uniqueCode(const std::string& label) const {
+  std::string base = slug(label), id = base;
+  for (int n = 2; find(id); ++n) id = base + "_" + std::to_string(n);
+  return id;
+}
+
+static bool checkDef(const RoleSet& rs, RoleDef& d, const std::string& self, std::string* err) {
+  auto fail = [&](const char* m) { if (err) *err = m; return false; };
+  d.label = trimJs(d.label);
+  if (d.label.empty()) return fail("The role needs a name.");
+  if (d.label.size() > 60) return fail("The name is too long (60 characters at most).");
+  if (!RoleSet::validClass(d.roleClass)) return fail("Pick what kind of role it is.");
+  const std::string want = lowerUtf8(d.label);
+  for (const auto& r : rs.roles()) if (r.code != self && lowerUtf8(r.label) == want) return fail("Another role already has that name.");
+  d.shortName = RoleSet::defaultShortName(d.shortName.empty() ? d.label : d.shortName);
+  if (d.shortName.empty()) d.shortName = RoleSet::defaultShortName(d.label);
+  return true;
+}
+
+bool RoleSet::add(RoleDef def, std::string* err) {
+  if (!checkDef(*this, def, "", err)) return false;
+  if (def.code.empty()) def.code = uniqueCode(def.label);
+  else if (find(def.code)) { if (err) *err = "That role id is already used."; return false; }
+  roles_.push_back(def);
+  return true;
+}
+bool RoleSet::update(const std::string& code, const RoleDef& def, std::string* err) {
+  for (auto& r : roles_) {
+    if (r.code != code) continue;
+    RoleDef d = def; d.code = code;
+    if (!checkDef(*this, d, code, err)) return false;
+    r = d;
+    return true;
+  }
+  if (err) *err = "That role does not exist any more.";
+  return false;
+}
+bool RoleSet::remove(const std::string& code) {
+  if (isProtected(code)) return false;
+  for (auto it = roles_.begin(); it != roles_.end(); ++it) if (it->code == code) { roles_.erase(it); return true; }
+  return false;
+}
+std::string RoleSet::toJson() const {
+  json j; j["version"] = 1; j["roles"] = json::array();
+  for (const auto& r : roles_) j["roles"].push_back({{"code", r.code}, {"label", r.label}, {"class", r.roleClass}, {"icon", r.icon}, {"short", r.shortName}});
+  return j.dump(2);
+}
+bool RoleSet::loadFromJson(const std::string& text, std::string* err) {
+  json root;
+  try { root = json::parse(text); }
+  catch (const std::exception& ex) { if (err) *err = std::string("Not valid JSON: ") + ex.what(); return false; }
+  if (!root.is_object() || !root.contains("roles") || !root["roles"].is_array()) { if (err) *err = "No \"roles\" list."; return false; }
+  RoleSet next;
+  auto str = [](const json& o, const char* k) { return (o.contains(k) && o[k].is_string()) ? o[k].get<std::string>() : std::string(); };
+  for (const auto& e : root["roles"]) {
+    if (!e.is_object()) continue;
+    RoleDef d; d.code = str(e, "code"); d.label = str(e, "label"); d.roleClass = str(e, "class"); d.icon = str(e, "icon"); d.shortName = str(e, "short");
+    if (d.code.empty() || next.find(d.code)) continue;
+    if (!validClass(d.roleClass)) d.roleClass = "specialty";
+    d.label = trimJs(d.label); if (d.label.empty()) d.label = d.code;
+    if (d.shortName.empty()) d.shortName = defaultShortName(d.label);
+    next.roles_.push_back(d);
+  }
+  if (next.roles_.empty()) { if (err) *err = "The roles list is empty."; return false; }
+  if (!next.find("dps")) next.roles_.push_back(*defaults().find("dps"));   // "dps" is needed (it also means "no role")
+  roles_ = next.roles_;
+  return true;
+}
+
 const RoleDef* RoleSet::find(const std::string& code) const {
   for (const auto& r : roles_) if (r.code == code) return &r;
   return nullptr;
@@ -62,6 +153,23 @@ void Assignments::setTank(const std::string& account, bool on) {
   std::string k = normKey(stripAccountPrefix(account));
   if (k.empty()) return;
   if (on) tanks_.insert(k); else tanks_.erase(k);
+}
+
+int Assignments::dropRole(const std::string& code) {
+  int n = 0;
+  for (auto it = map_.begin(); it != map_.end();) {
+    if (it->second == code) { tanks_.erase(it->first); it = map_.erase(it); ++n; } else ++it;
+  }
+  for (auto it = prefers_.begin(); it != prefers_.end();) it = (it->second == code) ? prefers_.erase(it) : std::next(it);
+  return n;
+}
+int Assignments::dropMissingRoles(const RoleSet& roles) {
+  std::set<std::string> gone;
+  for (const auto& kv : map_) if (!roles.find(kv.second)) gone.insert(kv.second);
+  for (const auto& kv : prefers_) if (!roles.find(kv.second)) gone.insert(kv.second);
+  int n = 0;
+  for (const auto& c : gone) n += dropRole(c);
+  return n;
 }
 
 void Assignments::prune(const std::vector<Member>& present) {

@@ -23,6 +23,22 @@ class RoleSet {
   const RoleDef* find(const std::string& code) const;
   std::string classOf(const std::string& code) const;
   std::string labelOf(const std::string& code) const;
+
+  // ---- editing (the Roles tab): add / edit / remove, saved as roles.json ----
+  // The composer's role id is the label lower-cased, "(notes)" removed, every run of other characters turned into "_"
+  // (Kite G2 -> kite_g2); a new role gets the same id so the Squad Watch exchange lines up. The id never changes afterwards.
+  static std::string slug(const std::string& label);
+  static std::string defaultShortName(const std::string& label);   // the label without spaces
+  static bool validClass(const std::string& c);                    // heal / boondps / dps / specialty
+  static bool isProtected(const std::string& code) { return code == "dps"; }   // "dps" also means "no role" in the change log, LFG text and "Set unassigned as DPS"
+  std::string uniqueCode(const std::string& label) const;          // slug, then slug_2, slug_3 ... when taken
+  // def.code empty = derive it from the label. False (and *err) for an empty / duplicate name, an unknown class or a taken code.
+  bool add(RoleDef def, std::string* err = nullptr);
+  // Replaces everything but the code. Same checks as add.
+  bool update(const std::string& code, const RoleDef& def, std::string* err = nullptr);
+  bool remove(const std::string& code);                             // false for unknown roles and for the protected "dps"
+  std::string toJson() const;
+  bool loadFromJson(const std::string& text, std::string* err = nullptr);   // replaces the list; keeps the old one on error
  private:
   std::vector<RoleDef> roles_;
 };
@@ -37,6 +53,10 @@ class Assignments {
   bool isTank(const std::string& account) const;
   void setTank(const std::string& account, bool on);
   void prune(const std::vector<Member>& present);  // optional: drop people no longer in squad
+  // A role was removed: everybody who held it becomes unassigned (their tank mark goes too: it needs a healer role),
+  // and nobody prefers it any more. Returns how many players lost the role.
+  int dropRole(const std::string& code);
+  int dropMissingRoles(const RoleSet& roles);      // dropRole for every assigned / preferred code the set does not have
   std::string toJson() const;
   bool loadFromJson(const std::string& text, std::string* err = nullptr);
   const std::map<std::string, std::string>& raw() const { return map_; }
